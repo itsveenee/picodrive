@@ -130,6 +130,37 @@ static bool libretro_update_geometry = false;
 RETRO_HW_RENDER_INTEFACE_GSKIT_PS2 *ps2 = NULL;
 static void *retro_palette;
 static struct retro_hw_ps2_insets padding;
+
+/* AURORA_PS2_SESSION_CLEANUP_V4_2
+ *
+ * Aurora fully deinitialises PicoDrive on Sega SetRom(NULL). Static libretro
+ * frontend/video selectors nevertheless survive in BSS across a later
+ * retro_init(). Reset only this PS2/frontend presentation state so a new
+ * lifetime begins like the first one.
+ *
+ * Deliberately do NOT memset PicoIn and do NOT free cartridge/SRAM here:
+ * native PicoDrive ownership remains with PicoExit/PicoCartUnload.
+ */
+static void aurora_ps2_reset_frontend_session(void)
+{
+   vm_current_start_line = -1;
+   vm_current_line_count = -1;
+   vm_current_start_col  = -1;
+   vm_current_col_count  = -1;
+
+   vout_16bit = 1;
+   vout_format = PDF_RGB555;
+   vout_width = VOUT_MAX_WIDTH;
+   vout_height = VOUT_MAX_HEIGHT;
+   vout_offset = 0;
+   vout_aspect = VOUT_PAR;
+   vout_ghosting = 0;
+
+   libretro_update_av_info = false;
+   libretro_update_geometry = false;
+
+   memset(&padding, 0, sizeof(padding));
+}
 #endif
 
 static short ALIGNED(4) sndBuffer[2*SND_RATE_MAX/50];
@@ -1373,6 +1404,18 @@ static void set_memory_maps(void)
 
 bool retro_load_game(const struct retro_game_info *info)
 {
+#if defined(RENDER_GSKIT_PS2)
+   /* AURORA_PS2_VIDEO_ALLOC_GUARD_V4_2 */
+   if (!vout_buf || !retro_palette)
+   {
+      if (log_cb)
+         log_cb(
+            RETRO_LOG_ERROR,
+            "PS2 renderer unavailable: video allocation failed.\n");
+      return false;
+   }
+#endif
+
    const struct retro_game_info_ext *info_ext = NULL;
    const unsigned char *content_data          = NULL;
    size_t content_size                        = 0;
@@ -2537,6 +2580,11 @@ void retro_init(void)
    struct retro_log_callback log;
    int level;
 
+#if defined(RENDER_GSKIT_PS2)
+   /* AURORA_PS2_SESSION_CLEANUP_V4_2 */
+   aurora_ps2_reset_frontend_session();
+#endif
+
    level = 0;
    environ_cb(RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL, &level);
 
@@ -2591,6 +2639,24 @@ void retro_init(void)
 #elif defined(RENDER_GSKIT_PS2)
    vout_buf = memalign(4096, VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2);
    retro_palette = memalign(128, gsKit_texture_size_ee(16, 16, GS_PSM_CT16));
+
+   /* AURORA_PS2_VIDEO_ALLOC_GUARD_V4_2
+    * retro_init() cannot report failure. Collapse a partial allocation to
+    * NULL/NULL; retro_load_game() below will then reject the launch cleanly
+    * instead of letting the renderer dereference a missing buffer. */
+   if (!vout_buf || !retro_palette)
+   {
+      if (log_cb)
+         log_cb(
+            RETRO_LOG_ERROR,
+            "PS2 video allocation failed (vout=%p palette=%p)\n",
+            vout_buf, retro_palette);
+
+      free(vout_buf);
+      free(retro_palette);
+      vout_buf = NULL;
+      retro_palette = NULL;
+   }
 #else
    vout_buf = malloc(VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2);
 #endif
@@ -2626,7 +2692,13 @@ void retro_deinit(void)
 #elif defined(RENDER_GSKIT_PS2)
    free(vout_buf);
    free(retro_palette);
+   retro_palette = NULL;
    ps2 = NULL;
+
+   /* AURORA_PS2_SESSION_CLEANUP_V4_2
+    * Retire presentation state at the full core lifetime boundary.
+    * vout_buf itself is nulled by the common code immediately below. */
+   aurora_ps2_reset_frontend_session();
 #elif defined(__PS3__)
    free(vout_buf);
    if (page_table[0] > 0 && page_table[1] > 0)
