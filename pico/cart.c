@@ -20,6 +20,30 @@
 #include <zlib.h>
 
 static int rom_alloc_size;
+
+#if defined(RENDER_GSKIT_PS2)
+/* AURORA_PD_BORROW_AURORA_ROM_V1
+ *
+ * Aurora already holds the cartridge in one 64-byte-aligned 8 MiB+1 KiB
+ * BSS buffer. Avoid allocating/copying a second ROM on the 32 MiB PS2.
+ *
+ * external_* is the buffer offered for the next PicoCartLoad().
+ * borrowed_* describes the buffer currently used by Pico.rom.
+ * They are separate because PicoLoadMedia() calls PicoCartUnload()
+ * before PicoCartLoad().
+ */
+static const unsigned char *ps2_external_rom;
+static unsigned int ps2_external_rom_capacity;
+static int ps2_rom_borrowed;
+static unsigned int ps2_borrowed_capacity;
+
+void PicoCartSetExternalRomBuffer(const unsigned char *rom,
+  unsigned int capacity)
+{
+  ps2_external_rom = rom;
+  ps2_external_rom_capacity = capacity;
+}
+#endif
 static const char *rom_exts[] = { "bin", "gen", "smd", "md", "32x", "pco", "iso", "sms", "gg", "sg", "sc" };
 
 void (*PicoCartUnloadHook)(void);
@@ -710,30 +734,39 @@ static int DecodeSmd(unsigned char *data,int len)
   return 0;
 }
 
-void *PicoCartAlloc(int filesize, int is_sms)
+static int PicoCartCalcAllocSize(int filesize, int is_sms)
 {
-  unsigned char *rom;
+  int alloc_size;
+  int s = 0, tmp = filesize;
 
   // make size power of 2 for easier banking handling
-  int s = 0, tmp = filesize;
   while ((tmp >>= 1) != 0)
     s++;
   if (filesize > (1 << s))
     s++;
-  rom_alloc_size = 1 << s;
+  alloc_size = 1 << s;
 
   if (is_sms) {
     // be sure we can cover all address space
-    if (rom_alloc_size < 0x10000)
-      rom_alloc_size = 0x10000;
+    if (alloc_size < 0x10000)
+      alloc_size = 0x10000;
   }
   else {
     // align to 512K for memhandlers
-    rom_alloc_size = (rom_alloc_size + 0x7ffff) & ~0x7ffff;
+    alloc_size = (alloc_size + 0x7ffff) & ~0x7ffff;
   }
 
-  if (rom_alloc_size - filesize < 4)
-    rom_alloc_size += 4; // padding for out-of-bound exec protection
+  if (alloc_size - filesize < 4)
+    alloc_size += 4; // padding for out-of-bound exec protection
+
+  return alloc_size;
+}
+
+void *PicoCartAlloc(int filesize, int is_sms)
+{
+  unsigned char *rom;
+
+  rom_alloc_size = PicoCartCalcAllocSize(filesize, is_sms);
 
   // Allocate space for the rom plus padding
   // use special address for 32x dynarec
@@ -746,6 +779,9 @@ int PicoCartLoad(pm_file *f, const unsigned char *rom, unsigned int romsize,
 {
   unsigned char *rom_data = NULL;
   int size, bytes_read;
+#if defined(RENDER_GSKIT_PS2)
+  int borrowed_alloc_size;
+#endif
 
   if (!f && !rom)
     return 1;
@@ -759,10 +795,39 @@ int PicoCartLoad(pm_file *f, const unsigned char *rom, unsigned int romsize,
   size = (size+3)&~3; // Round up to a multiple of 4
 
   // Allocate space for the rom plus padding
-  rom_data = PicoCartAlloc(size, is_sms);
-  if (rom_data == NULL) {
-    elprintf(EL_STATUS, "out of memory (wanted %i)", size);
-    return 2;
+#if defined(RENDER_GSKIT_PS2)
+  borrowed_alloc_size = PicoCartCalcAllocSize(size, is_sms);
+  ps2_rom_borrowed = 0;
+  ps2_borrowed_capacity = 0;
+
+  if (rom != NULL &&
+      rom == ps2_external_rom &&
+      borrowed_alloc_size > 0 &&
+      (unsigned int)borrowed_alloc_size <= ps2_external_rom_capacity)
+  {
+    /* Borrow Aurora's already-resident mutable ROM buffer. PicoDrive
+     * byteswaps in place, which is safe after Aurora's SetRom boundary.
+     * Zero the rounded tail to match mmap's zero-filled padding and make
+     * sure bytes from a previous cartridge cannot leak into banked reads. */
+    rom_alloc_size = borrowed_alloc_size;
+    rom_data = (unsigned char *)rom;
+    if ((unsigned int)rom_alloc_size > romsize)
+      memset(rom_data + romsize, 0,
+        (unsigned int)rom_alloc_size - romsize);
+
+    ps2_rom_borrowed = 1;
+    ps2_borrowed_capacity = ps2_external_rom_capacity;
+    elprintf(EL_STATUS, "PS2: borrowing frontend ROM buffer (%i bytes)",
+      rom_alloc_size);
+  }
+  else
+#endif
+  {
+    rom_data = PicoCartAlloc(size, is_sms);
+    if (rom_data == NULL) {
+      elprintf(EL_STATUS, "out of memory (wanted %i)", size);
+      return 2;
+    }
   }
 
   if (!rom) {
@@ -793,7 +858,7 @@ int PicoCartLoad(pm_file *f, const unsigned char *rom, unsigned int romsize,
       return 3;
     }
   }
-  else
+  else if (rom_data != rom)
     memcpy(rom_data, rom, romsize);
 
   if (!is_sms)
@@ -889,6 +954,18 @@ int PicoCartInsert(unsigned char *rom, unsigned int romsize, const char *carthw_
 
 int PicoCartResize(int newsize)
 {
+#if defined(RENDER_GSKIT_PS2)
+  if (ps2_rom_borrowed) {
+    if (newsize < 0 || (unsigned int)newsize > ps2_borrowed_capacity)
+      return -1;
+
+    if (newsize > rom_alloc_size)
+      memset(Pico.rom + rom_alloc_size, 0, newsize - rom_alloc_size);
+    rom_alloc_size = newsize;
+    return 0;
+  }
+#endif
+
   void *tmp = plat_mremap(Pico.rom, rom_alloc_size, newsize);
   if (tmp == NULL)
     return -1;
@@ -909,10 +986,18 @@ void PicoCartUnload(void)
 
   if (Pico.rom != NULL) {
     SekFinishIdleDet();
-    plat_munmap(Pico.rom, rom_alloc_size);
+#if defined(RENDER_GSKIT_PS2)
+    if (!ps2_rom_borrowed)
+#endif
+      plat_munmap(Pico.rom, rom_alloc_size);
+
     rom_alloc_size = 0;
     Pico.rom = NULL;
     Pico.romsize = 0;
+#if defined(RENDER_GSKIT_PS2)
+    ps2_rom_borrowed = 0;
+    ps2_borrowed_capacity = 0;
+#endif
   }
   PicoGameLoaded = 0;
 }
