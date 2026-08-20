@@ -407,78 +407,269 @@ static void DrawTilesFromCacheF(u32 *hc, struct PicoEState *est)
 }
 
 
+/* AURORA_FAST_HW_SPRITE_LIMIT_V1
+ *
+ * Normal PicoDrive ParseSprites() enforces:
+ * H40 = 20 sprites / 40 tiles per scanline
+ * H32 = 16 sprites / 32 tiles per scanline
+ * The Fast renderer draw2.c historically did neither.
+ */
+#define FAST_SPR_MAX  80
+#define FAST_SPR_ROWS 32
+
+static u32 *FastSprPtr[FAST_SPR_MAX];
+static unsigned char FastSprWidth[FAST_SPR_MAX][FAST_SPR_ROWS];
+static int FastSprCount;
+
+static int FastSprFind(u32 *sprite)
+{
+    int i;
+    for (i = 0; i < FastSprCount; ++i)
+        if (FastSprPtr[i] == sprite)
+            return i;
+    return -1;
+}
+
+static void FastBuildSpriteLimit(struct PicoEState *est)
+{
+    unsigned char lineSprites[240];
+    unsigned char lineTiles[240];
+    struct PicoVideo *pvid = &est->Pico->video;
+    int maxSprites, maxLineSprites, maxLineTiles;
+    int table, link = 0, u;
+
+    memset(lineSprites, 0, sizeof(lineSprites));
+    memset(lineTiles, 0, sizeof(lineTiles));
+    memset(FastSprWidth, 0, sizeof(FastSprWidth));
+    FastSprCount = 0;
+
+    if (PicoIn.opt & POPT_DIS_SPRITE_LIM)
+        return;
+
+    if (est->rendstatus & PDRAW_32_COLS)
+    {
+        maxSprites = 64;
+        maxLineSprites = 16;
+        maxLineTiles = 32;
+    }
+    else
+    {
+        maxSprites = 80;
+        maxLineSprites = 20;
+        maxLineTiles = 40;
+    }
+
+    table = pvid->reg[5] & 0x7f;
+    if (!(est->rendstatus & PDRAW_32_COLS))
+        table &= 0x7e;
+    table <<= 8;
+
+    for (u = 0; u < maxSprites && link < maxSprites; ++u)
+    {
+        u32 *sprite;
+        int code, sy, hv, width, height, local;
+
+        sprite = (u32 *)(est->PicoMem_vram +
+                 ((table + (link << 2)) & 0x7ffc));
+        code = sprite[0];
+
+        sy = (code & 0x1ff) - 0x80;
+        hv = (code >> 24) & 0x0f;
+        width = ((hv >> 2) & 3) + 1;
+        height = (hv & 3) + 1;
+
+        if (FastSprCount < FAST_SPR_MAX)
+        {
+            int slot = FastSprCount++;
+            FastSprPtr[slot] = sprite;
+
+            for (local = 0;
+                 local < height * 8 && local < FAST_SPR_ROWS;
+                 ++local)
+            {
+                int y = sy + local;
+                int avail, allow;
+
+                if (y < 0 || y >= 240)
+                    continue;
+                if (lineSprites[y] >= maxLineSprites)
+                    continue;
+
+                lineSprites[y]++;
+
+                avail = maxLineTiles - lineTiles[y];
+                if (avail <= 0)
+                    continue;
+
+                allow = width;
+                if (allow > avail)
+                    allow = avail;
+
+                FastSprWidth[slot][local] = (unsigned char)allow;
+                lineTiles[y] += (unsigned char)allow;
+            }
+        }
+
+        link = (code >> 16) & 0x7f;
+        if (!link)
+            break;
+    }
+}
+
+static void FastTileMasked(unsigned char *pd, int addr,
+                           unsigned char pal, struct PicoEState *est,
+                           int xflip, int yflip, unsigned rowMask)
+{
+    u16 *vram = est->PicoMem_vram;
+    int dy;
+
+#if INTERLACE
+    if (est->rendstatus & PDRAW_INTERLACE)
+        return;
+#endif
+
+    for (dy = 0; dy < 8; ++dy)
+    {
+        unsigned int pack;
+        unsigned char px[8];
+        unsigned char *d;
+        int sr, i;
+
+        if (!(rowMask & (1U << dy)))
+            continue;
+
+        sr = yflip ? (7 - dy) : dy;
+        pack = *(u32 *)(vram + addr + sr * 2);
+
+        px[0] = (unsigned char)((pack >> 12) & 0x0f);
+        px[1] = (unsigned char)((pack >>  8) & 0x0f);
+        px[2] = (unsigned char)((pack >>  4) & 0x0f);
+        px[3] = (unsigned char)((pack      ) & 0x0f);
+        px[4] = (unsigned char)((pack >> 28) & 0x0f);
+        px[5] = (unsigned char)((pack >> 24) & 0x0f);
+        px[6] = (unsigned char)((pack >> 20) & 0x0f);
+        px[7] = (unsigned char)((pack >> 16) & 0x0f);
+
+        d = pd + dy * est->Draw2Width;
+        for (i = 0; i < 8; ++i)
+        {
+            unsigned char t = xflip ? px[7 - i] : px[i];
+            if (t)
+                d[i] = (unsigned char)(pal | t);
+        }
+    }
+}
+
 // sx and sy are coords of virtual screen with 8pix borders on top and on left
 static void DrawSpriteFull(u32 *sprite, struct PicoEState *est)
 {
-	int width=0,height=0;
-//	unsigned short *pal=NULL;
-	unsigned char pal;
-	int tile,code,tdeltax,tdeltay;
-	unsigned char *scrpos;
-	int scrstart = est->Draw2Start;
-	int sx, sy;
+    int width=0,height=0;
+    unsigned char pal;
+    int tile,code,tdeltax,tdeltay;
+    unsigned char *scrpos;
+    int scrstart = est->Draw2Start;
+    int sx, sy;
+    int limitSlot;
+    int displayRowBase = 0;
 
-	sy=sprite[0];
-	height=sy>>24;
+    sy=sprite[0];
+    height=sy>>24;
 #if INTERLACE
-	if (est->rendstatus & PDRAW_INTERLACE)
-		sy = ((sy>>1)&0x1ff)-0x78;
-	else
+    if (est->rendstatus & PDRAW_INTERLACE)
+        sy = ((sy>>1)&0x1ff)-0x78;
+    else
 #endif
-		sy=(sy&0x1ff)-0x78; // Y
-	width=(height>>2)&3; height&=3;
-	width++; height++; // Width and height in tiles
+        sy=(sy&0x1ff)-0x78;
+    width=(height>>2)&3; height&=3;
+    width++; height++;
 
-	code=sprite[1];
-	sx=((code>>16)&0x1ff)-0x78; // X
+    code=sprite[1];
+    sx=((code>>16)&0x1ff)-0x78;
 
-	tile=code&0x7ff; // Tile number
-	tdeltax=height; // Delta to increase tile by going right
-	tdeltay=1;      // Delta to increase tile by going down
-	if (code&0x1000) { tile+=tdeltax-1; tdeltay=-tdeltay; } // Flip Y
-	if (code&0x0800) { tile+=tdeltax*(width-1); tdeltax=-tdeltax; } // Flip X
+    tile=code&0x7ff;
+    tdeltax=height;
+    tdeltay=1;
+    if (code&0x1000) { tile+=tdeltax-1; tdeltay=-tdeltay; }
+    if (code&0x0800) { tile+=tdeltax*(width-1); tdeltax=-tdeltax; }
 
-	//delta<<=4; // Delta of address
-//	pal=PicoCramHigh+((code>>9)&0x30); // Get palette pointer
-	pal=(unsigned char)((code>>9)&0x30);
+    pal=(unsigned char)((code>>9)&0x30);
+    limitSlot = FastSprFind(sprite);
 
-	// goto first vertically visible tile
-	sy -= scrstart*8;
-	while(sy <= 0) { sy+=8; tile+=tdeltay; height--; }
+    sy -= scrstart*8;
+    while(sy <= 0)
+    {
+        sy+=8;
+        tile+=tdeltay;
+        height--;
+        displayRowBase += 8;
+    }
 
-	scrpos = est->Draw2FB;
-	if ((~est->rendstatus & (PDRAW_BORDER_32|PDRAW_32_COLS)) == 0)
-		scrpos += 32;
-	scrpos+=sy*est->Draw2Width;
+    scrpos = est->Draw2FB;
+    if ((~est->rendstatus & (PDRAW_BORDER_32|PDRAW_32_COLS)) == 0)
+        scrpos += 32;
+    scrpos+=sy*est->Draw2Width;
 
-	for (; height > 0; height--, sy+=8, tile+=tdeltay)
-	{
-		int w = width, x=sx, t=tile, s;
+    for (; height > 0;
+         height--, sy+=8, tile+=tdeltay, displayRowBase+=8)
+    {
+        int w = width, x=sx, t=tile, s;
+        int col = 0;
 
-		if(sy >= END_ROW*8+8) return; // offscreen
+        if(sy >= END_ROW*8+8) return;
 
-		for (; w; w--,x+=8,t+=tdeltax)
-		{
-			if(x<=0)   continue;
-			if(x>=328) break; // Offscreen
+        for (; w; w--,x+=8,t+=tdeltax,col++)
+        {
+            unsigned rowMask = 0xffU;
 
-			t&=0x7fff; // Clip tile address
+            if(x<=0)   continue;
+            if(x>=328) break;
+
+            if (limitSlot >= 0)
+            {
+                int r;
+                rowMask = 0;
+                for (r = 0; r < 8; ++r)
+                {
+                    int lr = displayRowBase + r;
+                    if (lr >= 0 && lr < FAST_SPR_ROWS &&
+                        FastSprWidth[limitSlot][lr] > col)
+                        rowMask |= 1U << r;
+                }
+                if (!rowMask)
+                    continue;
+            }
+
+            t&=0x7fff;
 #if INTERLACE
-			if (est->rendstatus & PDRAW_INTERLACE)
-				s=5;
-			else
+            if (est->rendstatus & PDRAW_INTERLACE)
+                s=5;
+            else
 #endif
-				s=4;
-			switch((code>>11)&3) {
-				case 0: TileXnormYnorm(scrpos+x,t<<s,pal,est); break;
-				case 1: TileXflipYnorm(scrpos+x,t<<s,pal,est); break;
-				case 2: TileXnormYflip(scrpos+x,t<<s,pal,est); break;
-				case 3: TileXflipYflip(scrpos+x,t<<s,pal,est); break;
-			}
-		}
+                s=4;
 
-		scrpos+=8*est->Draw2Width;
-	}
+            if (rowMask == 0xffU
+#if INTERLACE
+                || (est->rendstatus & PDRAW_INTERLACE)
+#endif
+               )
+            {
+                switch((code>>11)&3) {
+                    case 0: TileXnormYnorm(scrpos+x,t<<s,pal,est); break;
+                    case 1: TileXflipYnorm(scrpos+x,t<<s,pal,est); break;
+                    case 2: TileXnormYflip(scrpos+x,t<<s,pal,est); break;
+                    case 3: TileXflipYflip(scrpos+x,t<<s,pal,est); break;
+                }
+            }
+            else
+            {
+                FastTileMasked(scrpos+x, t<<s, pal, est,
+                               !!(code&0x0800), !!(code&0x1000),
+                               rowMask);
+            }
+        }
+
+        scrpos+=8*est->Draw2Width;
+    }
 }
 #endif
 
@@ -591,6 +782,8 @@ static void DrawDisplayFull(void)
 	} else {
 		maxw = 328; maxcolc = 40;
 	}
+	FastBuildSpriteLimit(est);
+
 	if(est->rendstatus & PDRAW_30_ROWS) {
 		// In 240 line mode, the top and bottom 8 lines are omitted
 		// since this renderer always renders 224 lines
