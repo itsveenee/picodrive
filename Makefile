@@ -482,7 +482,8 @@ endif
 # want to remove this stuff for better performance if your compiler can handle it
 ifeq "$(DEBUG)" "0"
 ifeq (,$(findstring msvc,$(platform)))
-cpu/fame/famec.o: CFLAGS += -g0 -O2 -fno-expensive-optimizations
+# AURORA_PD_FAME_PS2_O3_V3_20260821
+cpu/fame/famec.o: CFLAGS += -g0 $(if $(filter ps2,$(platform)),-O3,-O2 -fno-expensive-optimizations)
 else
 cpu/fame/famec.o: CFLAGS += -Od
 endif

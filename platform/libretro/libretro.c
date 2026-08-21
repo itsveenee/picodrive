@@ -131,6 +131,21 @@ RETRO_HW_RENDER_INTEFACE_GSKIT_PS2 *ps2 = NULL;
 static void *retro_palette;
 static struct retro_hw_ps2_insets padding;
 
+/* AURORA_PD_SKIP_DISCARDED_VIDEO_V2_CORE_20260821 */
+static bool aurora_frontend_skip_next_video_frame = false;
+/* AURORA_PD_PALETTE_SERIAL_V7_CORE_20260821 */
+static unsigned int aurora_ps2_palette_serial = 0;
+
+unsigned int PicoDriveLibretro_GetPaletteSerial(void)
+{
+   return aurora_ps2_palette_serial;
+}
+
+void PicoDriveLibretro_SetSkipNextVideoFrame(int skip)
+{
+   aurora_frontend_skip_next_video_frame = skip ? true : false;
+}
+
 /* AURORA_PS2_SESSION_CLEANUP_V4_2
  *
  * Aurora fully deinitialises PicoDrive on Sega SetRom(NULL). Static libretro
@@ -159,6 +174,8 @@ static void aurora_ps2_reset_frontend_session(void)
    libretro_update_av_info = false;
    libretro_update_geometry = false;
 
+   /* A new libretro PS2 presentation lifetime starts at generation 0. */
+   aurora_ps2_palette_serial = 0;
    memset(&padding, 0, sizeof(padding));
 }
 #endif
@@ -1810,6 +1827,32 @@ static const unsigned short retro_pico_map[] = {
 };
 #define RETRO_PICO_MAP_LEN (sizeof(retro_pico_map) / sizeof(retro_pico_map[0]))
 
+#if defined(RENDER_GSKIT_PS2)
+/* AURORA_PD_PS2_INPUT_MASK_FAST_V4_20260821
+ * libretro joypad bits -> PicoDrive GBTN bits. This is exactly the same map
+ * as retro_pico_map[], expressed as fixed shifts so the R5900 avoids the
+ * per-pad loop and its conditional branches. */
+static inline unsigned short aurora_ps2_map_joypad_mask(uint16_t v)
+{
+   unsigned p;
+
+   /* U/D/L/R: libretro bits 4..7 -> Pico bits 0..3. */
+   p  = ((unsigned)v >> 4) & 0x000fU;
+
+   /* B,Y,Select,Start,A,X,L,R -> B,A,Mode,Start,C,Y,X,Z. */
+   p |= ((unsigned)v & (1U << RETRO_DEVICE_ID_JOYPAD_B))      << 4;
+   p |= ((unsigned)v & (1U << RETRO_DEVICE_ID_JOYPAD_Y))      << 5;
+   p |= ((unsigned)v & (1U << RETRO_DEVICE_ID_JOYPAD_SELECT)) << 9;
+   p |= ((unsigned)v & (1U << RETRO_DEVICE_ID_JOYPAD_START))  << 4;
+   p |= ((unsigned)v & (1U << RETRO_DEVICE_ID_JOYPAD_A))      >> 3;
+   p |= ((unsigned)v & (1U << RETRO_DEVICE_ID_JOYPAD_X));
+   p |= ((unsigned)v & (1U << RETRO_DEVICE_ID_JOYPAD_L));
+   p |= ((unsigned)v & (1U << RETRO_DEVICE_ID_JOYPAD_R))      >> 3;
+
+   return (unsigned short)p;
+}
+#endif
+
 static int has_4_pads;
 
 static void snd_write(int len)
@@ -2366,6 +2409,12 @@ void retro_run(void)
    bool updated = false;
    int pad, i, padcount;
    static void *buff;
+#if defined(RENDER_GSKIT_PS2)
+   /* AURORA_PD_SKIP_DISCARDED_VIDEO_V2_CORE_CONSUME_20260821 */
+   bool aurora_frontend_skip =
+      aurora_frontend_skip_next_video_frame;
+   aurora_frontend_skip_next_video_frame = false;
+#endif
 
    PicoIn.skipFrame = 0;
 
@@ -2402,10 +2451,21 @@ void retro_run(void)
       }
    }
 
-   for (pad = 0; pad < padcount; pad++)
-     for (i = 0; i < RETRO_PICO_MAP_LEN; i++)
-	 if (input[pad] & (1 << i))
-	     PicoIn.pad[pad] |= retro_pico_map[i];
+#if defined(RENDER_GSKIT_PS2)
+   if (libretro_supports_bitmasks)
+   {
+      /* AURORA_PD_PS2_INPUT_MASK_FAST_V4_20260821_USE */
+      for (pad = 0; pad < padcount; ++pad)
+         PicoIn.pad[pad] = aurora_ps2_map_joypad_mask((uint16_t)input[pad]);
+   }
+   else
+#endif
+   {
+      for (pad = 0; pad < padcount; pad++)
+        for (i = 0; i < RETRO_PICO_MAP_LEN; i++)
+          if (input[pad] & (1 << i))
+              PicoIn.pad[pad] |= retro_pico_map[i];
+   }
 
    if (PicoIn.AHW == PAHW_PICO) {
        uint16_t ev = input[0] &
@@ -2442,6 +2502,14 @@ void retro_run(void)
       } else
          frameskip_counter++;
    }
+
+   /* AURORA_PD_SKIP_DISCARDED_VIDEO_V2_CORE_APPLY_20260821:
+    * Aurora's exact 50/60 scheduler has precedence over optional
+    * libretro audio-buffer frameskip. */
+#if defined(RENDER_GSKIT_PS2)
+   if (aurora_frontend_skip)
+      PicoIn.skipFrame = 1;
+#endif
 
    /* If frameskip settings have changed, update
     * frontend audio latency */
@@ -2514,6 +2582,7 @@ void retro_run(void)
          else
             memcpy(pal+i,Pico.est.HighPal+i,16);
       }
+      ++aurora_ps2_palette_serial;
    }
 #else
    if (!vout_16bit) {
