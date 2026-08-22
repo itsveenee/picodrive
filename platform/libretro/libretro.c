@@ -754,7 +754,12 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
    float common_width;
 
    memset(info, 0, sizeof(*info));
+#if defined(RENDER_GSKIT_PS2)
+   /* AURORA_PD_NTSC_5994_CLOCK_V1_20260822 */
+   info->timing.fps            = Pico.m.pal ? 50.0 : (60000.0 / 1001.0);
+#else
    info->timing.fps            = Pico.m.pal ? 50 : 60;
+#endif
    info->timing.sample_rate    = PicoIn.sndRate;
    info->geometry.base_width   = vout_width;
    info->geometry.base_height  = vout_height;

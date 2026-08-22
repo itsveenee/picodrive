@@ -198,7 +198,17 @@ static int ymopts;
 void PsndRerate(int preserve_state)
 {
   void *state = NULL;
-  int target_fps = Pico.m.pal ? 50 : 60;
+  /* AURORA_PD_NTSC_5994_CLOCK_V1_20260822
+   * PS2 NTSC presentation is 60000/1001 Hz. Keep PAL at exact 50 Hz,
+   * but make NTSC audio scheduling use the host-family rational instead
+   * of rounded 60.000. Other PicoDrive platforms retain upstream timing. */
+#if defined(RENDER_GSKIT_PS2)
+  int target_fps_num = Pico.m.pal ? 50 : 60000;
+  int target_fps_den = Pico.m.pal ? 1 : 1001;
+#else
+  int target_fps_num = Pico.m.pal ? 50 : 60;
+  int target_fps_den = 1;
+#endif
   int target_lines = Pico.m.pal ? 313 : 262;
   int sms_clock = Pico.m.pal ? OSC_PAL/15 : OSC_NTSC/15;
   int ym2413_rate = (sms_clock + 36) / 72;
@@ -269,13 +279,19 @@ void PsndRerate(int preserve_state)
   else
     SN76496_init(Pico.m.pal ? OSC_PAL/15 : OSC_NTSC/15, PicoIn.sndRate);
 
-  // calculate Pico.snd.len
-  Pico.snd.len = PicoIn.sndRate / target_fps;
-  Pico.snd.len_e_add = ((PicoIn.sndRate - Pico.snd.len * target_fps) << 16) / target_fps;
+  // calculate Pico.snd.len using the exact frame-rate rational
+  Pico.snd.len = (int)(
+      (long long)PicoIn.sndRate * target_fps_den / target_fps_num);
+  Pico.snd.len_e_add = (int)(
+      ((((long long)PicoIn.sndRate * target_fps_den -
+          (long long)Pico.snd.len * target_fps_num) << 16) /
+        target_fps_num));
   Pico.snd.len_e_cnt = 0; // Q16
 
   // samples per line (Q16)
-  Pico.snd.smpl_mult = 65536LL * PicoIn.sndRate / (target_fps*target_lines);
+  Pico.snd.smpl_mult =
+      65536LL * PicoIn.sndRate * target_fps_den /
+      ((long long)target_fps_num * target_lines);
   // samples per z80 clock (Q20)
   Pico.snd.clkz_mult = 16 * Pico.snd.smpl_mult * 15/7 / 488.5;
   // samples per 44.1 KHz sample (Q16)
