@@ -10,6 +10,56 @@
 #define CYCLES_M68K_LINE     488 // suitable for both PAL/NTSC
 #define CYCLES_M68K_VINT_LAG 112
 
+/* AURORA_PICODRIVE_HYBRID_FAST_V2
+ * Adaptive replacement for the old all-or-nothing Fast renderer.
+ * Keep draw2 for frames it can represent faithfully; fall back to the
+ * normal scanline renderer only for frames requiring unsupported
+ * raster behaviour. This is presentation-only: CPU/VDP timing is not
+ * relaxed and the Golden Axe III VINT/HINT timing path is untouched. */
+extern int PicoAltRendererFallbackFrame;
+
+static int PicoAltRendererNeedsGoodFrame(struct PicoVideo *pv)
+{
+  int lines, htab, plane, y, yy, yend;
+  u16 h;
+
+  /* draw2 has no shadow/highlight renderer. */
+  if (pv->reg[12] & 0x08)
+    return 1;
+
+  /* draw2.c builds with VSRAM=0: 2-cell vertical scroll is unsupported. */
+  if (pv->reg[11] & 0x04)
+    return 1;
+
+  /* draw2.c builds with INTERLACE=0: interlace mode 2 needs Good. */
+  if ((pv->reg[12] & 0x06) == 0x06)
+    return 1;
+
+  /* Cell H-scroll (8-line granularity) matches draw2's tile-row model.
+   * True line-scroll does not. Only fall back if values actually vary
+   * inside an 8-line block; games using mode 3 with repeated values
+   * still get the Fast path. */
+  if ((pv->reg[11] & 0x03) == 0x03)
+  {
+    lines = (pv->reg[1] & 0x08) ? 240 : 224;
+    htab = pv->reg[13] << 9;
+    for (plane = 0; plane < 2; ++plane)
+    {
+      for (y = 0; y < lines; y += 8)
+      {
+        yend = y + 8;
+        if (yend > lines) yend = lines;
+        h = PicoMem.vram[(htab + plane + (y << 1)) & 0x7fff];
+        for (yy = y + 1; yy < yend; ++yy)
+          if (PicoMem.vram[(htab + plane + (yy << 1)) & 0x7fff] != h)
+            return 1;
+      }
+    }
+  }
+
+  return 0;
+}
+
 // CPUS_RUN
 #ifndef CPUS_RUN
 #define CPUS_RUN(m68k_cycles) \
@@ -138,6 +188,10 @@ static int PicoFrameHints(void)
 
   skip = PicoIn.skipFrame;
 
+  PicoAltRendererFallbackFrame =
+    (PicoIn.opt & POPT_ALT_RENDERER) &&
+    PicoAltRendererNeedsGoodFrame(pv);
+
   Pico.t.m68c_frame_start = Pico.t.m68c_aim;
   PsndStartFrame();
   PicoPortUpdate();
@@ -164,20 +218,9 @@ static int PicoFrameHints(void)
       do_hint(pv);
     }
 
-    // decide if we draw this line
-    if (unlikely(PicoIn.opt & POPT_ALT_RENDERER) && !skip)
-    {
-      // find the right moment for frame renderer, when display is no longer blanked
-      if ((pv->reg[1]&0x40) || y > 100) {
-        if (Pico.est.rendstatus & PDRAW_SYNC_NEEDED)
-          PicoFrameFull();
-#ifdef DRAW_FINISH_FUNC
-        DRAW_FINISH_FUNC();
-#endif
-        Pico.est.rendstatus &= ~PDRAW_SYNC_NEEDED;
-        skip = 1;
-      }
-    }
+    /* Hybrid Fast deliberately waits until the end of active display.
+     * Any rendering-affecting VDP sync before then can promote this
+     * frame to Good without having already committed a stale draw2 frame. */
 
     // Run scanline:
     Pico.t.m68c_line_start = Pico.t.m68c_aim;
@@ -190,6 +233,21 @@ static int PicoFrameHints(void)
   }
 
   SyncCPUs(Pico.t.m68c_aim);
+
+  /* Commit draw2 only after the whole active display proved safe.
+   * If a mid-frame VDP change selected fallback, the existing Good
+   * completion block below renders the remaining scanlines instead. */
+  if (unlikely(PicoIn.opt & POPT_ALT_RENDERER) &&
+      !PicoAltRendererFallbackFrame && !skip)
+  {
+    if (Pico.est.rendstatus & PDRAW_SYNC_NEEDED)
+      PicoFrameFull();
+#ifdef DRAW_FINISH_FUNC
+    DRAW_FINISH_FUNC();
+#endif
+    Pico.est.rendstatus &= ~PDRAW_SYNC_NEEDED;
+    skip = 1;
+  }
 
   if (!skip)
   {

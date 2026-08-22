@@ -12,6 +12,8 @@
 #define NEED_DMA_SOURCE
 #include "memory.h"
 
+extern int PicoAltRendererFallbackFrame;
+
 
 enum { clkdiv = 2 };    // CPU clock granularity: one of 1,2,4,8
 
@@ -853,7 +855,17 @@ void PicoVideoSync(int skip)
   int lines = Pico.video.reg[1]&0x08 ? 240 : 224;
   int last = Pico.m.scanline - (skip > 0);
 
-  if (!(PicoIn.opt & POPT_ALT_RENDERER) && !PicoIn.skipFrame) {
+  
+  /* AURORA_PICODRIVE_HYBRID_FAST_V6_REPAIR
+   * The old Fast renderer commits one tile-based state for the frame.
+   * If rendering state changes during active display, promote this
+   * frame before the write is committed so the Good renderer can
+   * preserve the old/new raster states correctly. */
+  if ((PicoIn.opt & POPT_ALT_RENDERER) && !PicoIn.skipFrame &&
+      Pico.m.scanline >= 0 && Pico.m.scanline < lines)
+    PicoAltRendererFallbackFrame = 1;
+if ((!(PicoIn.opt & POPT_ALT_RENDERER) ||
+       PicoAltRendererFallbackFrame) && !PicoIn.skipFrame) {
     if (last >= lines)
       last = lines-1;
     else // in active display, need to sync next frame as well

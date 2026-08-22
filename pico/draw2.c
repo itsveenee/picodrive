@@ -157,7 +157,7 @@ static int TileXflipYflip(unsigned char *pd,int addr,unsigned char pal, struct P
 static void DrawWindowFull(int start, int end, int prio, struct PicoEState *est)
 {
 	struct PicoVideo *pvid=&est->Pico->video;
-	int nametab, nametab_step, trow, tilex, blank=-1, code;
+	int nametab, nametab_step, trow, tilex, blank=-1;
 	unsigned char *scrpos = est->Draw2FB;
 	int scrstart = est->Draw2Start;
 	int tile_start, tile_end; // in cells
@@ -183,10 +183,11 @@ static void DrawWindowFull(int start, int end, int prio, struct PicoEState *est)
 	}
 	nametab += nametab_step*(start-scrstart);
 
-	// check priority
-	code=est->PicoMem_vram[nametab+tile_start];
-	if ((code>>15) != prio) return; // hack: just assume that whole window uses same priority
-
+	/* AURORA_PICODRIVE_HYBRID_FAST_V2
+	 * Window tiles may mix priorities. The old Fast renderer sampled
+	 * only the first tile and applied that decision to the whole window.
+	 * Check each tile instead; one cheap branch avoids a class of
+	 * priority glitches without switching renderer. */
 	scrpos+=8*est->Draw2Width+8;
 	scrpos+=8*est->Draw2Width*(start-scrstart);
 
@@ -199,6 +200,7 @@ static void DrawWindowFull(int start, int end, int prio, struct PicoEState *est)
 			unsigned char pal;
 
 			code=est->PicoMem_vram[nametab+tilex];
+			if ((code>>15) != prio) continue;
 			if (code==blank) continue;
 
 			// Get tile address/2:

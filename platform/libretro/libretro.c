@@ -845,9 +845,17 @@ size_t retro_serialize_size(void)
    unsigned AHW = PicoIn.AHW;
    int ret;
 
-   /* we need the max possible size here, so include 32X for MD and MCD */
+   /* AURORA_PD_PS2_ACTUAL_STATE_SIZE_V1
+    * Upstream asks for the maximum possible MD/MCD state envelope by
+    * temporarily enabling 32X. That is friendly to desktop frontends,
+    * but wastes scarce EE heap on PS2 and can make large ROMs fail to
+    * allocate a savestate buffer. Aurora reloads/requeries state size
+    * per content, so on PS2 use the actually active hardware only.
+    * Real 32X content already has PAHW_32X set and keeps its full size. */
+#if !defined(RENDER_GSKIT_PS2)
    if (!(AHW & (PAHW_SMS|PAHW_PICO|PAHW_SVP)))
       PicoIn.AHW |= PAHW_32X;
+#endif
    ret = PicoStateFP(&state, 1, NULL, state_skip, NULL, state_fseek);
    PicoIn.AHW = AHW;
    if (ret != 0)

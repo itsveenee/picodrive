@@ -16,6 +16,16 @@ struct Pico Pico;
 struct PicoMem PicoMem;
 PicoInterface PicoIn;
 
+/* AURORA_PICODRIVE_HYBRID_FAST_V6_REPAIR
+ * Single storage definition for the adaptive Fast renderer.
+ * pico_cmn.c is textually included by pico.c/mcd.c/32x.c. */
+int PicoAltRendererFallbackFrame = 0;
+
+/* AURORA_PICODRIVE_HYBRID_FAST_V3_LINK
+ * Shared adaptive-Fast frame flag. pico_cmn.c is included by more
+ * than one translation unit, so the storage must live here once. */
+
+
 void (*PicoResetHook)(void) = NULL;
 void (*PicoLineHook)(void) = NULL;
 
