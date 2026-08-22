@@ -605,7 +605,18 @@ void emu_video_mode_change(int start_line, int line_count, int start_col, int co
    // calculate the borders of the real image inside the picodrive image
    vout_width = (vout_16bit ? VOUT_MAX_WIDTH : VOUT_8BIT_WIDTH);
    vout_height = (vout_16bit ? VOUT_MAX_HEIGHT : VOUT_8BIT_HEIGHT);
-   vout_offset = (vout_16bit ? 0 : col_count == 248 ? 16 : 8); // 8bit has overlap area on the left
+   /* AURORA_PD_PS2_SMS248_GOOD_PADDING_V1
+    * Accurate/RGB555 writes the active image at x=0.
+    * Good/PDF_8BIT uses the 328-wide no-copy layout but FinalizeLine8bit()
+    * compacts masked-column SMS to x=8.
+    * Fast/PDF_NONE retains both the 8-pixel overlap and the masked column,
+    * so 248-wide SMS still starts at x=16 there. */
+   if (vout_16bit)
+      vout_offset = 0;
+   else if (vout_format == PDF_8BIT)
+      vout_offset = 8;
+   else
+      vout_offset = (col_count == 248 ? 16 : 8);
    padding = (struct retro_hw_ps2_insets){start_line, vout_offset, vout_height - line_count - start_line, vout_width - col_count - vout_offset};
 
    int pxsz = (vout_16bit ? 2 : 1); // pixel size: RGB = 16 bits, CLUT = 8 bits
