@@ -33,6 +33,75 @@ static resampler_t *ym2612_resampler;
 static resampler_t *ym2413_resampler;
 static int (*PsndFMUpdate)(s32 *buffer, int length, int stereo, int is_buf_empty);
 
+#if defined(RENDER_GSKIT_PS2)
+/* AURORA_SMS_FM_FAST_PS2_V1
+ *
+ * emu2413 is still stepped at the real YM2413 sample cadence (~49.7 kHz).
+ * Only the expensive external polyphase FIR is replaced on PS2 by a
+ * fixed-point sample selector. This keeps pitch/timing while reducing the
+ * post-OPLL cost substantially at Aurora's usual 16 kHz output rate. */
+static u32 ym2413_ps2_step_q16;
+static u32 ym2413_ps2_phase_q16;
+static s16 ym2413_ps2_last;
+
+static void YM2413PS2FastSetup(int inrate, int outrate)
+{
+  if (inrate <= 0) inrate = 1;
+  if (outrate <= 0) outrate = 1;
+
+  ym2413_ps2_step_q16 =
+      (u32)(((u64)(unsigned)inrate << 16) / (unsigned)outrate);
+
+  if (ym2413_ps2_step_q16 < 0x10000u)
+    ym2413_ps2_step_q16 = 0x10000u;
+
+  ym2413_ps2_phase_q16 = 0;
+  ym2413_ps2_last = 0;
+}
+
+static s16 YM2413PS2FastNext(void)
+{
+  unsigned native_samples;
+
+  if (!ym2413_ps2_step_q16)
+    YM2413PS2FastSetup(opll ? (int)opll->rate : 49716, PicoIn.sndRate);
+
+  ym2413_ps2_phase_q16 += ym2413_ps2_step_q16;
+  native_samples = ym2413_ps2_phase_q16 >> 16;
+  ym2413_ps2_phase_q16 &= 0xffffu;
+
+  do {
+    ym2413_ps2_last = (s16)(OPLL_calc(opll) * 3);
+  } while (--native_samples);
+
+  return ym2413_ps2_last;
+}
+
+static int YM2413UpdatePS2Fast(s32 *buffer, int length, int stereo,
+                               int is_buf_empty)
+{
+  (void)is_buf_empty;
+
+  while (length-- > 0) {
+    const s32 sample = YM2413PS2FastNext();
+    *buffer++ = sample;
+    if (stereo)
+      *buffer++ = sample;
+  }
+  return 0;
+}
+
+static void YM2413MixPS2Fast(s16 *buffer, int length, int stereo)
+{
+  while (length-- > 0) {
+    const s16 sample = YM2413PS2FastNext();
+    *buffer++ += sample;
+    if (stereo)
+      *buffer++ += sample;
+  }
+}
+#endif
+
 PICO_INTERNAL void PsndInit(void)
 {
   opll = OPLL_new(OSC_NTSC/15, OSC_NTSC/15/72);
@@ -156,10 +225,22 @@ void PsndRerate(int preserve_state)
     if (!preserve_state)
       OPLL_reset(opll);
     resampler_free(ym2413_resampler);
+#if !defined(RENDER_GSKIT_PS2)
     ym2413_resampler = YMFM_setup_FIR(ym2413_rate, PicoIn.sndRate, 0);
+#else
+    ym2413_resampler = NULL;
+#endif
   }
   if (PicoIn.AHW & PAHW_SMS) {
+#if defined(RENDER_GSKIT_PS2)
+    /* Output rate can change while the native OPLL rate remains constant. */
+    resampler_free(ym2413_resampler);
+    ym2413_resampler = NULL;
+    YM2413PS2FastSetup(ym2413_rate, PicoIn.sndRate);
+    PsndFMUpdate = YM2413UpdatePS2Fast;
+#else
     PsndFMUpdate = YM2413UpdateFIR;
+#endif
   } else if ((PicoIn.opt & POPT_EN_FM_FILTER) && ym2612_rate != PicoIn.sndRate) {
     // polyphase FIR resampler, resampling directly from native to output rate
     if (ym2612_init)
@@ -327,8 +408,11 @@ PICO_INTERNAL void PsndDoSMSFM(int cyc_to)
 
   if (Pico.m.hardware & PMS_HW_FMUSED) {
     buf += pos;
+#if defined(RENDER_GSKIT_PS2)
+    YM2413MixPS2Fast(buf, len, stereo);
+#else
     YM2413UpdateFIR(buf32, len, 0, 0);
-    if (stereo) 
+    if (stereo)
       while (len--) {
         *buf++ += *buf32;
         *buf++ += *buf32++;
@@ -337,6 +421,7 @@ PICO_INTERNAL void PsndDoSMSFM(int cyc_to)
       while (len--) {
         *buf++ += *buf32++;
       }
+#endif
   }
 }
 
@@ -609,6 +694,9 @@ static int PsndRenderMS(int offset, int length)
     Pico.snd.ym2413_pos += (length-ym2413len) << 20;
     int len = (length-ym2413len);
     if (Pico.m.hardware & PMS_HW_FMUSED) {
+#if defined(RENDER_GSKIT_PS2)
+      YM2413MixPS2Fast(ym2413buf, len, stereo);
+#else
       PsndFMUpdate(buf32, len, 0, 0);
       if (stereo)
         while (len--) {
@@ -619,6 +707,7 @@ static int PsndRenderMS(int offset, int length)
         while (len--) {
           *ym2413buf++ += *buf32++;
         }
+#endif
     }
   }
 

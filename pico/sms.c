@@ -1019,8 +1019,17 @@ void PicoResetMS(void)
   if (PicoIn.mapper)
     Pico.ms.mapper = PicoIn.mapper;
   Pico.m.hardware |= PMS_HW_JAP; // default region Japan if no TMR header
-  if (PicoIn.regionOverride > 2)
-    Pico.m.hardware &= ~PMS_HW_JAP;
+  if (PicoIn.regionOverride) {
+    /* AURORA_SMS_REGION_SYNC_V1_CORE
+     * regionOverride: 1=JP NTSC, 2=JP PAL, 4=US, 8=Europe.
+     * Apply both territory and cadence before PsndReset() below. */
+    Pico.m.pal = (PicoIn.regionOverride == 2 || PicoIn.regionOverride == 8);
+    if (PicoIn.regionOverride > 2)
+      Pico.m.hardware &= ~PMS_HW_JAP;
+  } else {
+    /* Power-on default is NTSC. Known 50-Hz-only carts below may set PAL. */
+    Pico.m.pal = 0;
+  }
   Pico.m.hardware |= PMS_HW_FM;
   if (!(PicoIn.opt & POPT_EN_YM2413))
     Pico.m.hardware &= ~PMS_HW_FM;
