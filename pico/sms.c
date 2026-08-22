@@ -579,6 +579,19 @@ static void z80_sms_out(unsigned short a, unsigned char d)
           // pad. latch hcounter if one of the TH lines is switched to 1
           if ((Pico.ms.io_ctl ^ d) & d & 0xa0)
             Pico.ms.vdp_hlatch = vdp_hcounter(z80_cyclesDone() - Pico.t.z80c_line_start);
+
+          /* AURORA_SMS_JP_IO_REGION_V1
+           * Real Japanese Master System hardware does not read back the
+           * TH/TR output levels like an Export SMS. Games use this behaviour
+           * on port 0x3f to distinguish Japan from Export hardware.
+           *
+           * Keep GG/SG/SC untouched: GG has its own region bit and already
+           * behaves correctly. */
+          if ((PicoIn.AHW & PAHW_SMS) &&
+              !(PicoIn.AHW & (PAHW_GG | PAHW_SG | PAHW_SC)) &&
+              (Pico.m.hardware & PMS_HW_JAP))
+            d &= 0x0f;
+
           Pico.ms.io_ctl = d;
         }
         break;
