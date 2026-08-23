@@ -158,6 +158,15 @@ typedef struct
 	unsigned char  pad[3];
 
 	uintptr_t      Fetch[M68K_FETCHBANK1];
+
+	/* AURORA_V8_4_FAME_LAYOUT_LTO_LINKFIX_20260823
+	 * V8 direct-map pointers are host-only state. Keep them at the tail so
+	 * every legacy FAME field retains its original offset, while all TUs see
+	 * one identical M68K_CONTEXT regardless of frontend compile defines. */
+	uintptr_t      *pd_read8_map;
+	uintptr_t      *pd_read16_map;
+	uintptr_t      *pd_write8_map;
+	uintptr_t      *pd_write16_map;
 } M68K_CONTEXT;
 
 typedef enum

@@ -16,6 +16,10 @@
 #endif
 
 #include "fame.h"
+#if defined(RENDER_GSKIT_PS2)
+/* AURORA_V8_FAME_DIRECT_MAP_PS2_20260822 */
+#include <pico/memory.h>
+#endif
 
 
 // Options //
@@ -314,30 +318,125 @@
 #define POST_IO                 \
 //    CCnt = io_cycle_counter;
 
+#if defined(RENDER_GSKIT_PS2)
+/* AURORA_V8_FAME_DIRECT_MAP_PS2_20260822
+ * Same dispatcher semantics as MAKE_68K_READ/WRITE in pico/memory.h.
+ * The only removed work is the extra context-callback indirect call. */
+static FAMEC_EXTRA_INLINE u32 fame_pd_read8(M68K_CONTEXT *ctx, u32 a)
+{
+    uptr v;
+    a &= 0x00ffffff;
+    v = ctx->pd_read8_map[a >> M68K_MEM_SHIFT];
+    if (map_flag_set(v))
+        return ((cpu68k_read_f *)(v << 1))(a);
+    return *(u8 *)((v << 1) + MEM_BE2(a));
+}
+
+static FAMEC_EXTRA_INLINE u32 fame_pd_read16(M68K_CONTEXT *ctx, u32 a)
+{
+    uptr v;
+    a &= 0x00fffffe;
+    v = ctx->pd_read16_map[a >> M68K_MEM_SHIFT];
+    if (map_flag_set(v))
+        return ((cpu68k_read_f *)(v << 1))(a);
+    return *(u16 *)((v << 1) + a);
+}
+
+static FAMEC_EXTRA_INLINE u32 fame_pd_read32(M68K_CONTEXT *ctx, u32 a)
+{
+    uptr v, vs;
+    u32 d;
+    a &= 0x00fffffe;
+    v = ctx->pd_read16_map[a >> M68K_MEM_SHIFT];
+    vs = v << 1;
+    if (map_flag_set(v)) {
+        d  = ((cpu68k_read_f *)vs)(a) << 16;
+        d |= ((cpu68k_read_f *)vs)(a + 2);
+    }
+    else {
+        u16 *m = (u16 *)(vs + a);
+        d = (m[0] << 16) | m[1];
+    }
+    return d;
+}
+
+static FAMEC_EXTRA_INLINE void fame_pd_write8(M68K_CONTEXT *ctx, u32 a, u32 d)
+{
+    uptr v;
+    a &= 0x00ffffff;
+    v = ctx->pd_write8_map[a >> M68K_MEM_SHIFT];
+    if (map_flag_set(v))
+        ((cpu68k_write_f *)(v << 1))(a, d);
+    else
+        *(u8 *)((v << 1) + MEM_BE2(a)) = (u8)d;
+}
+
+static FAMEC_EXTRA_INLINE void fame_pd_write16(M68K_CONTEXT *ctx, u32 a, u32 d)
+{
+    uptr v;
+    a &= 0x00fffffe;
+    v = ctx->pd_write16_map[a >> M68K_MEM_SHIFT];
+    if (map_flag_set(v))
+        ((cpu68k_write_f *)(v << 1))(a, d);
+    else
+        *(u16 *)((v << 1) + a) = (u16)d;
+}
+
+static FAMEC_EXTRA_INLINE void fame_pd_write32(M68K_CONTEXT *ctx, u32 a, u32 d)
+{
+    uptr v, vs;
+    a &= 0x00fffffe;
+    v = ctx->pd_write16_map[a >> M68K_MEM_SHIFT];
+    vs = v << 1;
+    if (map_flag_set(v)) {
+        ((cpu68k_write_f *)vs)(a, d >> 16);
+        ((cpu68k_write_f *)vs)(a + 2, d);
+    }
+    else {
+        u16 *m = (u16 *)(vs + a);
+        m[0] = d >> 16;
+        m[1] = d;
+    }
+}
+
+#define FAME_PD_R8(c,a)    fame_pd_read8((c),(a))
+#define FAME_PD_R16(c,a)   fame_pd_read16((c),(a))
+#define FAME_PD_R32(c,a)   fame_pd_read32((c),(a))
+#define FAME_PD_W8(c,a,d)  fame_pd_write8((c),(a),(d))
+#define FAME_PD_W16(c,a,d) fame_pd_write16((c),(a),(d))
+#define FAME_PD_W32(c,a,d) fame_pd_write32((c),(a),(d))
+#else
+#define FAME_PD_R8(c,a)    ((c)->read_byte(a))
+#define FAME_PD_R16(c,a)   ((c)->read_word(a))
+#define FAME_PD_R32(c,a)   ((c)->read_long(a))
+#define FAME_PD_W8(c,a,d)  ((c)->write_byte((a),(d)))
+#define FAME_PD_W16(c,a,d) ((c)->write_word((a),(d)))
+#define FAME_PD_W32(c,a,d) ((c)->write_long((a),(d)))
+#endif
 #define READ_BYTE_F(A, D)           \
-	D = ctx->read_byte(A) & 0xFF;
+	D = FAME_PD_R8(ctx, (A)) & 0xFF;
 
 #define READ_WORD_F(A, D)           \
-	D = ctx->read_word(A) & 0xFFFF;
+	D = FAME_PD_R16(ctx, (A)) & 0xFFFF;
 
 #define READ_LONG_F(A, D)           \
-	D = ctx->read_long(A);
+	D = FAME_PD_R32(ctx, (A));
 
 #define READSX_LONG_F READ_LONG_F
 
 #define WRITE_LONG_F(A, D)          \
-	ctx->write_long(A, D);
+	FAME_PD_W32(ctx, (A), (D));
 
 #define WRITE_LONG_DEC_F(A, D)          \
-	ctx->write_word((A) + 2, (D) & 0xFFFF);    \
-	ctx->write_word((A), (D) >> 16);
+	FAME_PD_W16(ctx, (A) + 2, (D) & 0xFFFF);    \
+	FAME_PD_W16(ctx, (A), (D) >> 16);
 
 #define PUSH_32_F(D)                        \
 	AREG(7) -= 4;                               \
-	ctx->write_long(AREG(7), D);
+	FAME_PD_W32(ctx, AREG(7), (D));
 
 #define POP_32_F(D)                         \
-	D = ctx->read_long(AREG(7));         \
+	D = FAME_PD_R32(ctx, AREG(7));         \
 	AREG(7) += 4;
 
 #ifndef FAME_BIG_ENDIAN
@@ -409,23 +508,23 @@
 #endif
 
 #define READSX_BYTE_F(A, D)             \
-    D = (s8)ctx->read_byte(A);
+    D = (s8)FAME_PD_R8(ctx, (A));
 
 #define READSX_WORD_F(A, D)             \
-    D = (s16)ctx->read_word(A);
+    D = (s16)FAME_PD_R16(ctx, (A));
 
 
 #define WRITE_BYTE_F(A, D)      \
-    ctx->write_byte(A, D);
+    FAME_PD_W8(ctx, (A), (D));
 
 #define WRITE_WORD_F(A, D)      \
-    ctx->write_word(A, D);
+    FAME_PD_W16(ctx, (A), (D));
 
 #define PUSH_16_F(D)                    \
-    ctx->write_word(AREG(7) -= 2, D);   \
+    FAME_PD_W16(ctx, AREG(7) -= 2, (D));   \
 
 #define POP_16_F(D)                     \
-    D = (u16)ctx->read_word(AREG(7));   \
+    D = (u16)FAME_PD_R16(ctx, AREG(7));   \
     AREG(7) += 2;
 
 #define GET_CCR                                     \

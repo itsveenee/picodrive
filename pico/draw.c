@@ -46,6 +46,16 @@
 #include "pico_int.h"
 #include <platform/common/upscale.h>
 
+#if defined(RENDER_GSKIT_PS2)
+/* AURORA_PD_R5900_GOOD_ACCURATE_V6_20260822
+ * Leaf R5900 helpers only; the full legacy assembly renderer stays disabled. */
+void aurora_r5900_clut(unsigned short *dst, unsigned char *src,
+                       unsigned short *pal, int count);
+void aurora_r5900_clut_6bit(unsigned short *dst, unsigned char *src,
+                            unsigned short *pal, int count);
+void aurora_r5900_blockcpy_or(void *dst, void *src, size_t n, int pat);
+#endif
+
 #define FORCE	// layer forcing via debug register?
 
 int (*PicoScanBegin)(unsigned int num) = NULL;
@@ -1547,14 +1557,17 @@ void FinalizeLine555(int sh, int line, struct PicoEState *est)
   } else {
     if ((est->rendstatus & PDRAW_BORDER_32) && len < 320)
       pd += (320-len) / 2;
-#if 1
-    h_copy(pd, 320, ps, 320, len, f_pal);
-#else
-    extern void amips_clut(unsigned short *dst, unsigned char *src, unsigned short *pal, int count);
-    extern void amips_clut_6bit(unsigned short *dst, unsigned char *src, unsigned short *pal, int count);
+#if defined(RENDER_GSKIT_PS2)
+    /* AURORA_PD_R5900_ACCURATE_CLUT_V6
+     * Existing PicoDrive R5900 implementation of the same palette lookup.
+     * FinalizeLine555 lengths are 160/248/256/320 here: all multiples of 4,
+     * and DrawLineDest is 32-bit aligned by the PS2 video allocation/layout. */
     if (!sh)
-         amips_clut_6bit(pd, ps, pal, len);
-    else amips_clut(pd, ps, pal, len);
+      aurora_r5900_clut_6bit(pd, ps, pal, len);
+    else
+      aurora_r5900_clut(pd, ps, pal, len);
+#else
+    h_copy(pd, 320, ps, 320, len, f_pal);
 #endif
   }
 }
@@ -1607,8 +1620,23 @@ void FinalizeLine8bit(int sh, int line, struct PicoEState *est)
     if ((est->rendstatus & PDRAW_BORDER_32) && len < 320)
       pd += (320-len) / 2;
     if (!sh && (est->rendstatus & PDRAW_SONIC_MODE))
-      // select active backup palette
-      blockcpy_or(pd, ps, len, est->SonicPalCount*0x40);
+    {
+      /* AURORA_PD_R5900_GOOD_SONIC_OR_V6
+       * Normal Good is already no-copy. Only Sonic/mid-frame palette mode
+       * needs this OR pass. The existing R5900 routine uses SQ, so call it
+       * only when source==destination and the destination is 16-byte aligned;
+       * otherwise retain the exact C implementation. With PS2's 4096-aligned
+       * vout buffer and 328-byte pitch, this accelerates the naturally aligned
+       * lines without changing the others. */
+#if defined(RENDER_GSKIT_PS2)
+      if (pd == ps && (((unsigned long)pd & 15UL) == 0) &&
+          ((len & 15) == 0))
+        aurora_r5900_blockcpy_or(
+          pd, ps, (size_t)len, est->SonicPalCount*0x40);
+      else
+#endif
+        blockcpy_or(pd, ps, len, est->SonicPalCount*0x40);
+    }
     else if (pd != ps)
       blockcpy(pd, ps, len);
   }

@@ -1239,6 +1239,13 @@ PICO_INTERNAL void PicoMemSetup(void)
   PicoCpuFM68k.write_byte = (void *)m68k_write8;
   PicoCpuFM68k.write_word = (void *)m68k_write16;
   PicoCpuFM68k.write_long = (void *)m68k_write32;
+#ifdef RENDER_GSKIT_PS2
+  /* AURORA_V8_FAME_DIRECT_MAP_PS2_20260822 */
+  PicoCpuFM68k.pd_read8_map   = m68k_read8_map;
+  PicoCpuFM68k.pd_read16_map  = m68k_read16_map;
+  PicoCpuFM68k.pd_write8_map  = m68k_write8_map;
+  PicoCpuFM68k.pd_write16_map = m68k_write16_map;
+#endif
 #endif
 #ifdef EMU_M68K
   m68k_mem_setup();

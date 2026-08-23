@@ -416,37 +416,41 @@ static void DrawTilesFromCacheF(u32 *hc, struct PicoEState *est)
  * H32 = 16 sprites / 32 tiles per scanline
  * The Fast renderer draw2.c historically did neither.
  */
-#define FAST_SPR_MAX  80
-#define FAST_SPR_ROWS 32
+#define FAST_SPR_MAX       80
+#define FAST_SPR_TILE_ROWS  4
+#define FAST_SPR_TILE_COLS  4
 
-static u32 *FastSprPtr[FAST_SPR_MAX];
-static unsigned char FastSprWidth[FAST_SPR_MAX][FAST_SPR_ROWS];
-static int FastSprCount;
-
-static int FastSprFind(u32 *sprite)
+/* AURORA_PD_MD_FAST_SPRITE_PREPARSE_V5_20260822
+ *
+ * Prepare the corrected Fast renderer sprite information once in original
+ * SAT order: hardware sprite/tile limits, masking state, low/high draw lists,
+ * and the row mask ultimately consumed by DrawSpriteFull().
+ */
+typedef struct FastSprDrawEntry
 {
-    int i;
-    for (i = 0; i < FastSprCount; ++i)
-        if (FastSprPtr[i] == sprite)
-            return i;
-    return -1;
-}
+    u32 *sprite;
+    signed char limitSlot;
+} FastSprDrawEntry;
 
-static void FastBuildSpriteLimit(struct PicoEState *est)
+static unsigned char
+    FastSprMask[FAST_SPR_MAX][FAST_SPR_TILE_ROWS][FAST_SPR_TILE_COLS];
+static FastSprDrawEntry FastSprDraw[2][FAST_SPR_MAX];
+static int FastSprDrawCount[2];
+
+static void FastPrepareSprites(struct PicoEState *est, int maxwidth)
 {
     unsigned char lineSprites[240];
     unsigned char lineTiles[240];
     struct PicoVideo *pvid = &est->Pico->video;
     int maxSprites, maxLineSprites, maxLineTiles;
+    int limitEnabled;
     int table, link = 0, u;
+    int maskrange = 0;
+    int y_min = START_ROW * 8;
+    int y_max = END_ROW * 8;
 
-    memset(lineSprites, 0, sizeof(lineSprites));
-    memset(lineTiles, 0, sizeof(lineTiles));
-    memset(FastSprWidth, 0, sizeof(FastSprWidth));
-    FastSprCount = 0;
-
-    if (PicoIn.opt & POPT_DIS_SPRITE_LIM)
-        return;
+    if (est->rendstatus & PDRAW_30_ROWS)
+        y_min += 8, y_max += 8;
 
     if (est->rendstatus & PDRAW_32_COLS)
     {
@@ -461,6 +465,17 @@ static void FastBuildSpriteLimit(struct PicoEState *est)
         maxLineTiles = 40;
     }
 
+    FastSprDrawCount[0] = 0;
+    FastSprDrawCount[1] = 0;
+
+    limitEnabled = !(PicoIn.opt & POPT_DIS_SPRITE_LIM);
+    if (limitEnabled)
+    {
+        memset(lineSprites, 0, sizeof(lineSprites));
+        memset(lineTiles, 0, sizeof(lineTiles));
+        memset(FastSprMask, 0, sizeof(FastSprMask));
+    }
+
     table = pvid->reg[5] & 0x7f;
     if (!(est->rendstatus & PDRAW_32_COLS))
         table &= 0x7e;
@@ -469,7 +484,9 @@ static void FastBuildSpriteLimit(struct PicoEState *est)
     for (u = 0; u < maxSprites && link < maxSprites; ++u)
     {
         u32 *sprite;
-        int code, sy, hv, width, height, local;
+        int code, code2;
+        int sx, sy, hv, width, height, heightPixels;
+        int limitSlot = -1;
 
         sprite = (u32 *)(est->PicoMem_vram +
                  ((table + (link << 2)) & 0x7ffc));
@@ -479,18 +496,17 @@ static void FastBuildSpriteLimit(struct PicoEState *est)
         hv = (code >> 24) & 0x0f;
         width = ((hv >> 2) & 3) + 1;
         height = (hv & 3) + 1;
+        heightPixels = height << 3;
 
-        if (FastSprCount < FAST_SPR_MAX)
+        if (limitEnabled)
         {
-            int slot = FastSprCount++;
-            FastSprPtr[slot] = sprite;
+            int local;
+            limitSlot = u;
 
-            for (local = 0;
-                 local < height * 8 && local < FAST_SPR_ROWS;
-                 ++local)
+            for (local = 0; local < heightPixels && local < 32; ++local)
             {
                 int y = sy + local;
-                int avail, allow;
+                int avail, allow, col;
 
                 if (y < 0 || y >= 240)
                     continue;
@@ -498,7 +514,6 @@ static void FastBuildSpriteLimit(struct PicoEState *est)
                     continue;
 
                 lineSprites[y]++;
-
                 avail = maxLineTiles - lineTiles[y];
                 if (avail <= 0)
                     continue;
@@ -507,11 +522,63 @@ static void FastBuildSpriteLimit(struct PicoEState *est)
                 if (allow > avail)
                     allow = avail;
 
-                FastSprWidth[slot][local] = (unsigned char)allow;
+                for (col = 0; col < allow; ++col)
+                    FastSprMask[limitSlot][local >> 3][col] |=
+                        (unsigned char)(1U << (local & 7));
+
                 lineTiles[y] += (unsigned char)allow;
             }
         }
 
+        /* Same visibility/masking evolution as the old low/high SAT walks. */
+        if (sy + heightPixels <= y_min || sy > y_max)
+            goto nextsprite;
+
+        code2 = sprite[1];
+        sx = (code2 >> 16) & 0x1ff;
+
+        if (!sx)
+        {
+            int to = sy + heightPixels;
+
+            if (maskrange)
+            {
+                if ((maskrange >> 16) + 1 >= sy &&
+                    (maskrange >> 16) <= to &&
+                    (maskrange & 0xffff) < sy)
+                    sy = maskrange & 0xffff;
+                else if ((maskrange & 0xffff) - 1 <= to &&
+                         (maskrange & 0xffff) >= sy &&
+                         (maskrange >> 16) > to)
+                    to = maskrange >> 16;
+            }
+
+            if (sy <= y_min && to + 1 > y_min)
+                y_min = to + 1;
+            else if (to >= y_max && sy - 1 < y_max)
+                y_max = sy - 1;
+            else
+                maskrange = sy | (to << 16);
+
+            goto nextsprite;
+        }
+
+        sx -= 0x78;
+        if (sx <= -8 * 3 || sx >= maxwidth)
+            goto nextsprite;
+
+        {
+            int prio = (code2 >> 15) & 1;
+            int n = FastSprDrawCount[prio];
+            if (n < FAST_SPR_MAX)
+            {
+                FastSprDraw[prio][n].sprite = sprite;
+                FastSprDraw[prio][n].limitSlot = (signed char)limitSlot;
+                FastSprDrawCount[prio] = n + 1;
+            }
+        }
+
+nextsprite:
         link = (code >> 16) & 0x7f;
         if (!link)
             break;
@@ -563,7 +630,7 @@ static void FastTileMasked(unsigned char *pd, int addr,
 }
 
 // sx and sy are coords of virtual screen with 8pix borders on top and on left
-static void DrawSpriteFull(u32 *sprite, struct PicoEState *est)
+static void DrawSpriteFull(u32 *sprite, struct PicoEState *est, int limitSlot)
 {
     int width=0,height=0;
     unsigned char pal;
@@ -571,7 +638,6 @@ static void DrawSpriteFull(u32 *sprite, struct PicoEState *est)
     unsigned char *scrpos;
     int scrstart = est->Draw2Start;
     int sx, sy;
-    int limitSlot;
     int displayRowBase = 0;
 
     sy=sprite[0];
@@ -595,7 +661,6 @@ static void DrawSpriteFull(u32 *sprite, struct PicoEState *est)
     if (code&0x0800) { tile+=tdeltax*(width-1); tdeltax=-tdeltax; }
 
     pal=(unsigned char)((code>>9)&0x30);
-    limitSlot = FastSprFind(sprite);
 
     sy -= scrstart*8;
     while(sy <= 0)
@@ -628,15 +693,8 @@ static void DrawSpriteFull(u32 *sprite, struct PicoEState *est)
 
             if (limitSlot >= 0)
             {
-                int r;
-                rowMask = 0;
-                for (r = 0; r < 8; ++r)
-                {
-                    int lr = displayRowBase + r;
-                    if (lr >= 0 && lr < FAST_SPR_ROWS &&
-                        FastSprWidth[limitSlot][lr] > col)
-                        rowMask |= 1U << r;
-                }
+                /* AURORA_PD_MD_FAST_SPRITE_PREPARSE_V5_MASK */
+                rowMask = FastSprMask[limitSlot][displayRowBase >> 3][col];
                 if (!rowMask)
                     continue;
             }
@@ -665,8 +723,7 @@ static void DrawSpriteFull(u32 *sprite, struct PicoEState *est)
             else
             {
                 FastTileMasked(scrpos+x, t<<s, pal, est,
-                               !!(code&0x0800), !!(code&0x1000),
-                               rowMask);
+                               !!(code&0x0800), !!(code&0x1000), rowMask);
             }
         }
 
@@ -678,79 +735,81 @@ static void DrawSpriteFull(u32 *sprite, struct PicoEState *est)
 
 static void DrawAllSpritesFull(int prio, int maxwidth, struct PicoEState *est)
 {
-	struct PicoVideo *pvid=&est->Pico->video;
-	int table=0,maskrange=0;
-	int i,u,link=0;
-	u32 *sprites[80]; // Sprites
-	int y_min=START_ROW*8, y_max=END_ROW*8; // for a simple sprite masking
-	int max_sprites = !(est->rendstatus & PDRAW_32_COLS) ? 80 : 64;
+#ifndef _ASM_DRAW_C
+    int i;
 
-	if (est->rendstatus & PDRAW_30_ROWS)
-		y_min += 8, y_max += 8;
+    (void)maxwidth;
+    if ((unsigned)prio > 1U)
+        return;
 
-	table=pvid->reg[5]&0x7f;
-	if (!(est->rendstatus & PDRAW_32_COLS)) table&=0x7e; // Lowest bit 0 in 40-cell mode
-	table<<=8; // Get sprite table address/2
+    /* AURORA_PD_MD_FAST_SPRITE_PREPARSE_V5_DRAW */
+    for (i = FastSprDrawCount[prio] - 1; i >= 0; --i)
+        DrawSpriteFull(FastSprDraw[prio][i].sprite, est,
+                       FastSprDraw[prio][i].limitSlot);
+#else
+    /* Preserve the pre-existing platform ASM renderer path unchanged. */
+    struct PicoVideo *pvid=&est->Pico->video;
+    int table=0,maskrange=0;
+    int i,u,link=0;
+    u32 *sprites[80];
+    int y_min=START_ROW*8, y_max=END_ROW*8;
+    int max_sprites = !(est->rendstatus & PDRAW_32_COLS) ? 80 : 64;
 
-	for (i = u = 0; u < max_sprites && link < max_sprites; u++)
-	{
-		u32 *sprite=NULL;
-		int code, code2, sx, sy, height;
+    if (est->rendstatus & PDRAW_30_ROWS)
+        y_min += 8, y_max += 8;
 
-		sprite=(u32 *)(est->PicoMem_vram+((table+(link<<2))&0x7ffc)); // Find sprite
+    table=pvid->reg[5]&0x7f;
+    if (!(est->rendstatus & PDRAW_32_COLS)) table&=0x7e;
+    table<<=8;
 
-		// get sprite info
-		code = sprite[0];
+    for (i = u = 0; u < max_sprites && link < max_sprites; u++)
+    {
+        u32 *sprite=NULL;
+        int code, code2, sx, sy, height;
 
-		// check if it is not hidden vertically
+        sprite=(u32 *)(est->PicoMem_vram+((table+(link<<2))&0x7ffc));
+        code = sprite[0];
+
 #if INTERLACE
-		if (est->rendstatus & PDRAW_INTERLACE)
-			sy = ((code>>1)&0x1ff)-0x80;
-		else
+        if (est->rendstatus & PDRAW_INTERLACE)
+            sy = ((code>>1)&0x1ff)-0x80;
+        else
 #endif
-			sy = (code&0x1ff)-0x80;
-		height = (((code>>24)&3)+1)<<3;
-		if(sy+height <= y_min || sy > y_max) goto nextsprite;
+            sy = (code&0x1ff)-0x80;
+        height = (((code>>24)&3)+1)<<3;
+        if(sy+height <= y_min || sy > y_max) goto nextsprite;
 
-		// masking sprite?
-		code2=sprite[1];
-		sx = (code2>>16)&0x1ff;
-		if(!sx) {
-			int to = sy+height; // sy ~ from
-			if(maskrange) {
-				// try to merge with previous range
-				if((maskrange>>16)+1 >= sy && (maskrange>>16) <= to && (maskrange&0xffff) < sy) sy = (maskrange&0xffff);
-				else if((maskrange&0xffff)-1 <= to && (maskrange&0xffff) >= sy && (maskrange>>16) > to) to = (maskrange>>16);
-			}
-			// support only very simple masking (top and bottom of screen)
-			if(sy <= y_min && to+1 > y_min) y_min = to+1;
-			else if(to >= y_max && sy-1 < y_max) y_max = sy-1;
-			else maskrange=sy|(to<<16);
+        code2=sprite[1];
+        sx = (code2>>16)&0x1ff;
+        if(!sx) {
+            int to = sy+height;
+            if(maskrange) {
+                if((maskrange>>16)+1 >= sy && (maskrange>>16) <= to &&
+                   (maskrange&0xffff) < sy)
+                    sy = (maskrange&0xffff);
+                else if((maskrange&0xffff)-1 <= to &&
+                        (maskrange&0xffff) >= sy && (maskrange>>16) > to)
+                    to = (maskrange>>16);
+            }
+            if(sy <= y_min && to+1 > y_min) y_min = to+1;
+            else if(to >= y_max && sy-1 < y_max) y_max = sy-1;
+            else maskrange=sy|(to<<16);
+            goto nextsprite;
+        }
 
-			goto nextsprite;
-		}
+        if(((code2>>15)&1) != prio) goto nextsprite;
+        sx -= 0x78;
+        if(sx <= -8*3 || sx >= maxwidth) goto nextsprite;
+        sprites[i++]=sprite;
 
-		// priority
-		if(((code2>>15)&1) != prio) goto nextsprite; // wrong priority
+nextsprite:
+        link=(code>>16)&0x7f;
+        if(!link) break;
+    }
 
-		// check if sprite is not hidden horizontally
-		sx -= 0x78; // Get X coordinate + 8
-		if(sx <= -8*3 || sx >= maxwidth) goto nextsprite;
-
-		// sprite is good, save it's index
-		sprites[i++]=sprite;
-
-		nextsprite:
-		// Find next sprite
-		link=(code>>16)&0x7f;
-		if(!link) break; // End of sprites
-	}
-
-	// Go through sprites backwards:
-	for (i--; i >= 0; i--)
-	{
-		DrawSpriteFull(sprites[i], est);
-	}
+    for (i--; i >= 0; i--)
+        DrawSpriteFull(sprites[i], est);
+#endif
 }
 
 #ifndef _ASM_DRAW_C
@@ -784,7 +843,9 @@ static void DrawDisplayFull(void)
 	} else {
 		maxw = 328; maxcolc = 40;
 	}
-	FastBuildSpriteLimit(est);
+#ifndef _ASM_DRAW_C
+	FastPrepareSprites(est, maxw);
+#endif
 
 	if(est->rendstatus & PDRAW_30_ROWS) {
 		// In 240 line mode, the top and bottom 8 lines are omitted
