@@ -9,12 +9,6 @@ void mix_16h_to_32_resample_mono(s32 *dest, s16 *src, int count, int fac16);
 void mix_32_to_16_stereo(s16 *dest, s32 *src, int count);
 void mix_32_to_16_mono(s16 *dest, s32 *src, int count);
 
-#if defined(RENDER_GSKIT_PS2)
-/* AURORA_PD_MD_PERF_V7_20260822 */
-void mix_32_to_16_stereo_dc(s16 *dest, s32 *src, int count);
-void mix_32_to_16_mono_dc(s16 *dest, s32 *src, int count);
-#endif
-
 extern int mix_32_to_16_level;
 void mix_32_to_16_stereo_lvl(s16 *dest, s32 *src, int count);
 void mix_reset(int alpha_q16);

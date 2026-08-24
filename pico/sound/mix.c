@@ -61,21 +61,6 @@ static inline int filter_null(struct iir *fi2, int x)
 	return x;
 }
 
-#if defined(RENDER_GSKIT_PS2)
-/* AURORA_PD_MD_PERF_V7_20260822
- * Exact specialization for mix_reset(0), where alpha == 1<<QB.
- * y0 + (x - (y0>>QB))*(1<<QB) == x*(1<<QB) + (y0 & ((1<<QB)-1)).
- * The mandatory DC-removal stage y1 is unchanged. */
-static inline int filter_dc_only(struct iir *fi2, int x)
-{
-	const int residue = (int)((u32)fi2->y[0] & ((1U << QB) - 1));
-
-	fi2->y[0] = x * (1 << QB) + residue;
-	fi2->y[1] += (fi2->y[0] - fi2->y[1]) >> 9;
-	return (fi2->y[0] - fi2->y[1]) >> QB;
-}
-#endif
-
 #define filter	filter_band
 
 #define mix_32_to_16_stereo_core(dest, src, count, lv, fl) {	\
@@ -108,13 +93,6 @@ void mix_32_to_16_stereo(s16 *dest, s32 *src, int count)
 	mix_32_to_16_stereo_core(dest, src, count, 0, filter);
 }
 
-#if defined(RENDER_GSKIT_PS2)
-void mix_32_to_16_stereo_dc(s16 *dest, s32 *src, int count)
-{
-	mix_32_to_16_stereo_core(dest, src, count, 0, filter_dc_only);
-}
-#endif
-
 void mix_32_to_16_mono(s16 *dest, s32 *src, int count)
 {
 	int l;
@@ -130,24 +108,6 @@ void mix_32_to_16_mono(s16 *dest, s32 *src, int count)
 	}
 	lfi2 = lf;
 }
-
-#if defined(RENDER_GSKIT_PS2)
-void mix_32_to_16_mono_dc(s16 *dest, s32 *src, int count)
-{
-	int l;
-	struct iir lf = lfi2;
-
-	for (; count > 0; count--)
-	{
-		l = *dest;
-		l += *src++;
-		l = filter_dc_only(&lf, l);
-		Limit16(l);
-		*dest++ = l;
-	}
-	lfi2 = lf;
-}
-#endif
 
 
 void mix_16h_to_32(s32 *dest_buf, s16 *mp3_buf, int count)

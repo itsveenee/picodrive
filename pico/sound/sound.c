@@ -305,16 +305,7 @@ void PsndRerate(int preserve_state)
     PsndClear();
 
   // set mixer
-#if defined(RENDER_GSKIT_PS2)
-  /* AURORA_PD_MD_PERF_V7_20260822
-   * Exact fast path only when the optional low-pass filter is disabled. */
-  if (!(PicoIn.opt & POPT_EN_SNDFILTER))
-    PsndMix_32_to_16 = (PicoIn.opt & POPT_EN_STEREO) ?
-      mix_32_to_16_stereo_dc : mix_32_to_16_mono_dc;
-  else
-#endif
-    PsndMix_32_to_16 = (PicoIn.opt & POPT_EN_STEREO) ?
-      mix_32_to_16_stereo : mix_32_to_16_mono;
+  PsndMix_32_to_16 = (PicoIn.opt & POPT_EN_STEREO) ? mix_32_to_16_stereo : mix_32_to_16_mono;
   mix_reset(PicoIn.opt & POPT_EN_SNDFILTER ? PicoIn.sndFilterAlpha : 0);
 
   if (PicoIn.AHW & PAHW_PICO)
