@@ -2428,6 +2428,139 @@ void run_events_pico(unsigned int events)
     PicoPicohw.pen_pos[1] |= (pico_inp_mode == 1 ? 0x2f8 : 0x1fc) + pico_pen_y;
 }
 
+#if defined(RENDER_GSKIT_PS2)
+/* AURORA_PD_NATIVE_FASTPATH_V1_CORE_20260824
+ *
+ * Aurora-native frame driver.
+ *
+ * Loading/configuration/state/SRAM remain on the proven libretro ABI, but
+ * gameplay no longer needs retro_run() to bounce input and video through
+ * frontend callbacks. The standalone PS2 frontend likewise feeds PicoIn
+ * directly and calls PicoFrame().
+ *
+ * Sega Pico is deliberately NOT handled here; Aurora's bridge keeps its
+ * retro_run() fallback because that path owns Pico page/pen/overlay events.
+ */
+static int aurora_ps2_publish_native_video(void)
+{
+   int i;
+
+   if (!vout_buf || !retro_palette)
+      return 0;
+
+   if (!ps2)
+   {
+      if (!environ_cb(
+            RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE, (void **)&ps2) ||
+          !ps2)
+      {
+         if (log_cb)
+            log_cb(RETRO_LOG_ERROR,
+                  "Aurora native path: no PS2 HW render interface.\n");
+         return 0;
+      }
+
+      if (ps2->interface_version !=
+          RETRO_HW_RENDER_INTERFACE_GSKIT_PS2_VERSION)
+      {
+         if (log_cb)
+            log_cb(RETRO_LOG_ERROR,
+                  "Aurora native path: PS2 HW interface mismatch.\n");
+         return 0;
+      }
+   }
+
+   ps2->coreTexture->ClutPSM = GS_PSM_CT16;
+   ps2->coreTexture->Filter = GS_FILTER_LINEAR;
+   ps2->coreTexture->Clut = retro_palette;
+   ps2->coreTexture->Mem = vout_buf;
+   ps2->coreTexture->Width = vout_width;
+   ps2->coreTexture->Height = vout_height;
+   ps2->coreTexture->PSM = vout_16bit ? GS_PSM_CT16 : GS_PSM_T8;
+   ps2->padding = padding;
+
+   if (!vout_16bit && Pico.m.dirtyPal)
+   {
+      unsigned short int *pal;
+
+      PicoDrawUpdateHighPal();
+      pal = (unsigned short int *)retro_palette;
+
+      for (i = 0; i < 256; i += 8)
+      {
+         if ((i & 0x18) == 0x08)
+            memcpy(pal + i, Pico.est.HighPal + i + 8, 16);
+         else if ((i & 0x18) == 0x10)
+            memcpy(pal + i, Pico.est.HighPal + i - 8, 16);
+         else
+            memcpy(pal + i, Pico.est.HighPal + i, 16);
+      }
+
+      ++aurora_ps2_palette_serial;
+   }
+
+   return 1;
+}
+
+void PicoDriveAurora_RunFrameNative(
+      const uint16_t input_masks[4],
+      unsigned int pad_count,
+      int skip_video,
+      int refresh_variables)
+{
+   unsigned int pad;
+
+   if (PicoIn.AHW & PAHW_PICO)
+      return;
+
+   if (refresh_variables)
+      update_variables(false);
+
+   PicoIn.pad[0] = 0;
+   PicoIn.pad[1] = 0;
+   PicoIn.pad[2] = 0;
+   PicoIn.pad[3] = 0;
+
+   if (pad_count > 4)
+      pad_count = 4;
+
+   for (pad = 0; pad < pad_count; ++pad)
+      PicoIn.pad[pad] =
+         aurora_ps2_map_joypad_mask(input_masks ? input_masks[pad] : 0);
+
+   PicoIn.skipFrame = skip_video ? 1 : 0;
+
+   /* Aurora's PS2 build already compiles the unused retro_cheat/PicoPatches
+    * path out. Do not reintroduce even the null test in the native hot path. */
+
+   if (update_audio_latency)
+   {
+      environ_cb(
+            RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY, &audio_latency);
+      update_audio_latency = false;
+   }
+
+   PicoFrame();
+
+   if (libretro_update_av_info || libretro_update_geometry)
+   {
+      struct retro_system_av_info av_info;
+
+      retro_get_system_av_info(&av_info);
+      environ_cb(
+            libretro_update_av_info ?
+               RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO :
+               RETRO_ENVIRONMENT_SET_GEOMETRY,
+            &av_info);
+      libretro_update_av_info = false;
+      libretro_update_geometry = false;
+   }
+
+   if (!PicoIn.skipFrame)
+      aurora_ps2_publish_native_video();
+}
+#endif
+
 void retro_run(void)
 {
    bool updated = false;
