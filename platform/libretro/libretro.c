@@ -2471,7 +2471,7 @@ static int aurora_ps2_publish_native_video(void)
    }
 
    ps2->coreTexture->ClutPSM = GS_PSM_CT16;
-   ps2->coreTexture->Filter = GS_FILTER_LINEAR;
+   /* AURORA_V18_SAFE_PERF_PD_NATIVE_NOTIFY_20260824: parent sets the final NEAREST filter before any consumer. */
    ps2->coreTexture->Clut = retro_palette;
    ps2->coreTexture->Mem = vout_buf;
    ps2->coreTexture->Width = vout_width;
@@ -2516,42 +2516,45 @@ void PicoDriveAurora_RunFrameNative(
    if (refresh_variables)
       update_variables(false);
 
-   PicoIn.pad[0] = 0;
-   PicoIn.pad[1] = 0;
-   PicoIn.pad[2] = 0;
-   PicoIn.pad[3] = 0;
+   /* AURORA_V17_SAFE_PERF_PD_2PAD_NATIVE_20260824
+    * Aurora gameplay always calls this native entry with a valid
+    * two-pad array. Keep the generic fallback for any other caller. */
+   if (input_masks && pad_count == 2)
+   {
+      PicoIn.pad[0] = aurora_ps2_map_joypad_mask(input_masks[0]);
+      PicoIn.pad[1] = aurora_ps2_map_joypad_mask(input_masks[1]);
+      PicoIn.pad[2] = 0;
+      PicoIn.pad[3] = 0;
+   }
+   else
+   {
+      PicoIn.pad[0] = 0;
+      PicoIn.pad[1] = 0;
+      PicoIn.pad[2] = 0;
+      PicoIn.pad[3] = 0;
 
-   if (pad_count > 4)
-      pad_count = 4;
+      if (pad_count > 4)
+         pad_count = 4;
 
-   for (pad = 0; pad < pad_count; ++pad)
-      PicoIn.pad[pad] =
-         aurora_ps2_map_joypad_mask(input_masks ? input_masks[pad] : 0);
+      for (pad = 0; pad < pad_count; ++pad)
+         PicoIn.pad[pad] = aurora_ps2_map_joypad_mask(
+            input_masks ? input_masks[pad] : 0);
+   }
 
    PicoIn.skipFrame = skip_video ? 1 : 0;
 
    /* Aurora's PS2 build already compiles the unused retro_cheat/PicoPatches
     * path out. Do not reintroduce even the null test in the native hot path. */
 
-   if (update_audio_latency)
-   {
-      environ_cb(
-            RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY, &audio_latency);
-      update_audio_latency = false;
-   }
+   /* AURORA_V18_SAFE_PERF_PD_NATIVE_NOTIFY_20260824
+    * pdEnvironment treats latency/AV/geometry notifications as successful
+    * no-ops. Consume the internal flags without the libretro callback work. */
+   update_audio_latency = false;
 
    PicoFrame();
 
    if (libretro_update_av_info || libretro_update_geometry)
    {
-      struct retro_system_av_info av_info;
-
-      retro_get_system_av_info(&av_info);
-      environ_cb(
-            libretro_update_av_info ?
-               RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO :
-               RETRO_ENVIRONMENT_SET_GEOMETRY,
-            &av_info);
       libretro_update_av_info = false;
       libretro_update_geometry = false;
    }
