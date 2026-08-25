@@ -114,6 +114,43 @@ u32 VdpSATCache[2*128];  // VDP sprite cache (1st 32 sprite attr bits)
 // [visible_sprites_count, sprl_flags, tile_count, sprites_processed, sprite_idx[sprite_count], last_width]
 unsigned char HighLnSpr[240][4+MAX_LINE_SPRITES+1];
 
+#if defined(RENDER_GSKIT_PS2)
+/* AURORA_V15_MULTICORE_SPRITE_LIMIT_20260824
+ * Aurora's shared limiter is a sprite-selection hack. Level 0 preserves
+ * PicoDrive's exact native path. Scanline mode scales 34->N severity to the
+ * current H32/H40/TMS line limit; screen mode caps total SAT entries. */
+static int aurora_sprite_limit_level;
+static int aurora_sprite_limit_mode;
+
+void PicoDriveAurora_SetSpriteLimiter(int level, int mode)
+{
+  if (level < 0) level = 0;
+  if (level > 6) level = 6;
+  aurora_sprite_limit_level = level;
+  aurora_sprite_limit_mode = mode == 1 ? 1 : 0;
+}
+
+int PicoDriveAurora_GetSpriteLineBudget(int native_limit)
+{
+  static const int snes_budget[7] = { 34, 28, 24, 20, 16, 12, 8 };
+  int n;
+  if (!aurora_sprite_limit_level || aurora_sprite_limit_mode == 1)
+    return native_limit;
+  n = (native_limit * snes_budget[aurora_sprite_limit_level] + 17) / 34;
+  return n > 0 ? n : 1;
+}
+
+int PicoDriveAurora_GetSpriteScreenBudget(int native_total)
+{
+  static const int budget[7] = { 128, 28, 24, 20, 16, 12, 8 };
+  int n;
+  if (!aurora_sprite_limit_level || aurora_sprite_limit_mode != 1)
+    return native_total;
+  n = budget[aurora_sprite_limit_level];
+  return n < native_total ? n : native_total;
+}
+#endif
+
 int rendstatus_old;
 int rendlines;
 
@@ -873,6 +910,9 @@ static NOINLINE void DrawAllSpritesInterlace(int pri, int sh)
   int i,u,table,link=0,sline=Pico.est.DrawScanline<<1;
   u32 *sprites[80]; // Sprite index
   int max_sprites = pvid->reg[12]&1 ? 80 : 64;
+#if defined(RENDER_GSKIT_PS2)
+  max_sprites = PicoDriveAurora_GetSpriteScreenBudget(max_sprites);
+#endif
 
   table=pvid->reg[5]&0x7f;
   if (pvid->reg[12]&1) table&=0x7e; // Lowest bit 0 in 40-cell mode
@@ -908,6 +948,14 @@ static NOINLINE void DrawAllSpritesInterlace(int pri, int sh)
     link=(code>>16)&0x7f;
     if(!link) break; // End of sprites
   }
+
+#if defined(RENDER_GSKIT_PS2)
+  if (aurora_sprite_limit_level > 0 && aurora_sprite_limit_mode == 0) {
+    int native_line = pvid->reg[12]&1 ? 20 : 16;
+    int line_budget = PicoDriveAurora_GetSpriteLineBudget(native_line);
+    if (i > line_budget) i = line_budget;
+  }
+#endif
 
   // Go through sprites backwards:
   for (i-- ;i>=0; i--)
@@ -1209,6 +1257,10 @@ static NOINLINE void ParseSprites(int max_lines, int limit)
     max_sprites = 64, max_line_sprites = 16, max_width = 264;
   if (*est->PicoOpt & POPT_DIS_SPRITE_LIM)
     max_line_sprites = MAX_LINE_SPRITES;
+#if defined(RENDER_GSKIT_PS2)
+  max_sprites = PicoDriveAurora_GetSpriteScreenBudget(max_sprites);
+  max_line_sprites = PicoDriveAurora_GetSpriteLineBudget(max_line_sprites);
+#endif
 
   table=pvid->reg[5]&0x7f;
   if (pvid->reg[12]&1) table&=0x7e; // Lowest bit 0 in 40-cell mode

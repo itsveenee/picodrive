@@ -2501,12 +2501,23 @@ void retro_run(void)
        run_events_pico(new_ev);
    }
 
+#if !defined(RENDER_GSKIT_PS2)
    if (PicoPatches)
       PicoPatchApply();
+#else
+   /* AURORA_RUNTIME_LEAN_V1_PICODRIVE_20260824
+    * Aurora has no retro_cheat_* caller, so PicoPatches cannot be populated.
+    * Compile the per-frame patch check/application out of the PS2 core. */
+#endif
 
    /* Check whether current frame should
     * be skipped */
+#if defined(RENDER_GSKIT_PS2)
+   /* AURORA_RUNTIME_LEAN_V1_PICODRIVE_20260824: Aurora fixes picodrive_frameskip=disabled and owns cadence. */
+   if (0) {
+#else
    if ((frameskip_type > 0) && retro_audio_buff_active) {
+#endif
       switch (frameskip_type)
       {
          case 1: /* auto */

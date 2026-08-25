@@ -12,6 +12,12 @@
 #include "pico_int.h"
 #include <platform/common/upscale.h>
 
+#if defined(RENDER_GSKIT_PS2)
+/* AURORA_V15_MULTICORE_SPRITE_LIMIT_20260824: implemented in draw.c and shared by SMS/GG/TMS paths. */
+int PicoDriveAurora_GetSpriteLineBudget(int native_limit);
+int PicoDriveAurora_GetSpriteScreenBudget(int native_total);
+#endif
+
 static void (*FinalizeLineSMS)(int line);
 static int skip_next_line;
 static int screen_offset, line_offset;
@@ -19,6 +25,7 @@ static u8 mode;
 
 static unsigned int sprites_addr[32]; // bitmap address
 static unsigned char sprites_c[32]; // TMS sprites color
+static unsigned char sprites_i[32]; // original SAT index (Aurora screen limiter)
 static int sprites_x[32]; // x position
 static int sprites; // count
 static unsigned char sprites_map[2+256/8+2]; // collision detection map
@@ -198,6 +205,7 @@ static void ParseSpritesM4(int scanline)
 
     if (xoff + sat[MEM_LE2(0x80 + i*2)] >= 0) {
       sprites_x[s] = xoff + sat[MEM_LE2(0x80 + i*2)];
+      sprites_i[s] = (unsigned char)i;
       sprites_addr[s] = sprite_base + ((sat[MEM_LE2(0x80 + i*2 + 1)] & addr_mask) << (5-1)) +
         ((scanline - y) >> zoomed << (2-1));
       if (pv->reg[1] & 0x40) {
@@ -223,9 +231,19 @@ static void DrawSpritesM4(void)
   unsigned int pack;
   int zoomed = sprites_zoom & 0x1; // zoomed sprites, e.g. Earthworm Jim
   int s = sprites;
+  int screen_limit = 64;
+#if defined(RENDER_GSKIT_PS2)
+  {
+    int line_limit = PicoDriveAurora_GetSpriteLineBudget(8);
+    screen_limit = PicoDriveAurora_GetSpriteScreenBudget(64);
+    if (s > line_limit) s = line_limit;
+  }
+#endif
 
   // now draw all sprites backwards
   for (--s; s >= 0; s--) {
+    if ((int)sprites_i[s] >= screen_limit)
+      continue;
     pack = CPU_LE2(*(u32 *)(PicoMem.vram + sprites_addr[s]));
     if (zoomed) TileDoubleSprM4(sprites_x[s], pack, 0x10);
     else        TileNormSprM4(sprites_x[s], pack, 0x10);
@@ -475,6 +493,7 @@ static void ParseSpritesTMS(int scanline)
 
     sprites_c[s] = sat[MEM_LE2(4*i+3)] & 0x0f;
     sprites_x[s] = x;
+    sprites_i[s] = (unsigned char)i;
     sprites_addr[s] = sprite_base + ((sat[MEM_LE2(4*i + 2)] & addr_mask) << 3) +
       ((scanline - y) >> zoomed);
     if (pv->reg[1] & 0x40) {
@@ -502,9 +521,19 @@ static void DrawSpritesTMS(void)
   unsigned int pack;
   int zoomed = sprites_zoom & 0x1; // zoomed sprites
   int s = sprites;
+  int screen_limit = 32;
+#if defined(RENDER_GSKIT_PS2)
+  {
+    int line_limit = PicoDriveAurora_GetSpriteLineBudget(4);
+    screen_limit = PicoDriveAurora_GetSpriteScreenBudget(32);
+    if (s > line_limit) s = line_limit;
+  }
+#endif
 
   // now draw all sprites backwards
   for (--s; s >= 0; s--) {
+    if ((int)sprites_i[s] >= screen_limit)
+      continue;
     int x, c, w = (zoomed ? 16: 8);
     x = sprites_x[s];
     c = sprites_c[s];
