@@ -1266,6 +1266,21 @@ void PicoPrepareMS(void)
     Pico.m.hardware |= PMS_HW_LG;
 }
 
+/* AURORA_V6_SMS_PHYSICAL_PAUSE_NMI_20260828
+ * Alternate console-button PAUSE. The ordinary controller PAUSE remains
+ * untouched. If that ordinary PAUSE has a fresh rising edge in this same
+ * frame, PicoFrameMS() will generate the NMI itself and we deliberately do
+ * not duplicate it. If it is already held, this alternate button still gets
+ * its own NMI, exactly as an independent console PAUSE press should. */
+void PicoSmsInjectPauseNmi(int normal_pause_pressed)
+{
+  if ((PicoIn.AHW & PAHW_8BIT) != PAHW_SMS)
+    return;
+
+  if (!normal_pause_pressed || Pico.ms.nmi_state)
+    z80_nmi();
+}
+
 void PicoFrameMS(void)
 {
   struct PicoVideo *pv = &Pico.video;
