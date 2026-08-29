@@ -22,6 +22,177 @@
 static int rom_alloc_size;
 
 #if defined(RENDER_GSKIT_PS2)
+/* AURORA_CD_AUDIO_STREAM_V2_PD_CACHE_20260829
+ *
+ * USB mass:/ latency is paid per filesystem transaction, while Sega CD raw
+ * CDDA reaches pm_read_audio() in small frame-sized pieces. Keep one shared
+ * 128 KiB read-ahead window and a logical position per uncompressed pm_file.
+ *
+ * The cache is intentionally shared instead of embedded in every track: CUE
+ * sets may have many audio files and the PS2 only has 32 MiB RAM.
+ */
+#define AURORA_PD_STREAM_CACHE_BYTES (128 * 1024)
+
+typedef struct AuroraPdStreamState
+{
+  long pos;
+} AuroraPdStreamState;
+
+static unsigned char s_AuroraPdStreamCache[AURORA_PD_STREAM_CACHE_BYTES]
+  __attribute__((aligned(64)));
+static pm_file *s_AuroraPdStreamCacheOwner;
+static long s_AuroraPdStreamCacheStart;
+static size_t s_AuroraPdStreamCacheLength;
+
+static size_t AuroraPdReadCached(void *ptr, size_t bytes, pm_file *stream)
+{
+  AuroraPdStreamState *state;
+  unsigned char *out;
+  size_t total;
+
+  if (!stream || !ptr || bytes == 0)
+    return 0;
+
+  state = (AuroraPdStreamState *)stream->param;
+  if (!state)
+    return fread(ptr, 1, bytes, stream->file);
+
+  out = (unsigned char *)ptr;
+  total = 0;
+
+  /* Big one-shot cartridge/media reads should not bounce through the shared
+   * cache. Reposition to the logical byte and read directly. */
+  if (bytes >= (AURORA_PD_STREAM_CACHE_BYTES / 2))
+  {
+    size_t got;
+    fseek(stream->file, state->pos, SEEK_SET);
+    got = fread(out, 1, bytes, stream->file);
+    state->pos += (long)got;
+
+    if (s_AuroraPdStreamCacheOwner == stream)
+    {
+      s_AuroraPdStreamCacheOwner = NULL;
+      s_AuroraPdStreamCacheLength = 0;
+    }
+    return got;
+  }
+
+  while (bytes > 0)
+  {
+    size_t available = 0;
+
+    if (s_AuroraPdStreamCacheOwner == stream &&
+        state->pos >= s_AuroraPdStreamCacheStart &&
+        state->pos < s_AuroraPdStreamCacheStart +
+                     (long)s_AuroraPdStreamCacheLength)
+    {
+      available = s_AuroraPdStreamCacheLength -
+        (size_t)(state->pos - s_AuroraPdStreamCacheStart);
+    }
+    else
+    {
+      size_t want = AURORA_PD_STREAM_CACHE_BYTES;
+      size_t got;
+
+      if (state->pos < 0)
+        break;
+
+      if ((unsigned long)state->pos < (unsigned long)stream->size)
+      {
+        unsigned long remaining =
+          (unsigned long)stream->size - (unsigned long)state->pos;
+        if (remaining < want)
+          want = (size_t)remaining;
+      }
+      else if ((unsigned long)state->pos >= (unsigned long)stream->size)
+      {
+        break;
+      }
+
+      fseek(stream->file, state->pos, SEEK_SET);
+      got = fread(s_AuroraPdStreamCache, 1, want, stream->file);
+
+      s_AuroraPdStreamCacheOwner = stream;
+      s_AuroraPdStreamCacheStart = state->pos;
+      s_AuroraPdStreamCacheLength = got;
+      available = got;
+
+      if (available == 0)
+        break;
+    }
+
+    if (available > bytes)
+      available = bytes;
+
+    memcpy(out,
+           s_AuroraPdStreamCache +
+             (size_t)(state->pos - s_AuroraPdStreamCacheStart),
+           available);
+
+    out += available;
+    bytes -= available;
+    total += available;
+    state->pos += (long)available;
+  }
+
+  return total;
+}
+
+static int AuroraPdSeekCached(pm_file *stream, long offset, int whence)
+{
+  AuroraPdStreamState *state;
+  long newpos;
+
+  if (!stream)
+    return -1;
+
+  state = (AuroraPdStreamState *)stream->param;
+  if (!state)
+  {
+    fseek(stream->file, offset, whence);
+    return ftell(stream->file);
+  }
+
+  switch (whence)
+  {
+    case SEEK_SET:
+      newpos = offset;
+      break;
+    case SEEK_CUR:
+      newpos = state->pos + offset;
+      break;
+    case SEEK_END:
+      newpos = (long)stream->size + offset;
+      break;
+    default:
+      return -1;
+  }
+
+  if (newpos < 0)
+    return -1;
+
+  state->pos = newpos;
+  return (int)newpos;
+}
+
+static void AuroraPdCloseCached(pm_file *stream)
+{
+  if (!stream)
+    return;
+
+  if (s_AuroraPdStreamCacheOwner == stream)
+  {
+    s_AuroraPdStreamCacheOwner = NULL;
+    s_AuroraPdStreamCacheLength = 0;
+  }
+
+  if (stream->param)
+  {
+    free(stream->param);
+    stream->param = NULL;
+  }
+}
+
 /* AURORA_PD_BORROW_AURORA_ROM_V1
  *
  * Aurora already holds the cartridge in one 64-byte-aligned 8 MiB+1 KiB
@@ -334,6 +505,20 @@ chd_failed:
   strncpy(file->ext, ext, sizeof(file->ext) - 1);
   fseek(f, 0, SEEK_SET);
 
+#if defined(RENDER_GSKIT_PS2)
+  /* AURORA_CD_AUDIO_STREAM_V2_PD_STATE_20260829
+   * Tiny per-file state; the 128 KiB data window itself is global/shared. */
+  {
+    AuroraPdStreamState *state =
+      (AuroraPdStreamState *)calloc(1, sizeof(*state));
+    if (state)
+    {
+      state->pos = 0;
+      file->param = state;
+    }
+  }
+#endif
+
 #ifdef __GP2X__
   if (file->size > 0x400000)
     /* we use our own buffering */
@@ -433,7 +618,13 @@ size_t pm_read(void *ptr, size_t bytes, pm_file *stream)
     return -1;
   else if (stream->type == PMT_UNCOMPRESSED)
   {
-    ret = fread(ptr, 1, bytes, stream->file);
+#if defined(RENDER_GSKIT_PS2)
+    /* AURORA_CD_AUDIO_STREAM_V2_PD_READ_20260829 */
+    if (stream->param)
+      ret = (int)AuroraPdReadCached(ptr, bytes, stream);
+    else
+#endif
+      ret = fread(ptr, 1, bytes, stream->file);
   }
   else if (stream->type == PMT_ZIP)
   {
@@ -575,6 +766,11 @@ int pm_seek(pm_file *stream, long offset, int whence)
     return -1;
   else if (stream->type == PMT_UNCOMPRESSED)
   {
+#if defined(RENDER_GSKIT_PS2)
+    /* AURORA_CD_AUDIO_STREAM_V2_PD_SEEK_20260829 */
+    if (stream->param)
+      return AuroraPdSeekCached(stream, offset, whence);
+#endif
     fseek(stream->file, offset, whence);
     return ftell(stream->file);
   }
@@ -656,6 +852,10 @@ int pm_close(pm_file *fp)
 
   if (fp->type == PMT_UNCOMPRESSED)
   {
+#if defined(RENDER_GSKIT_PS2)
+    /* AURORA_CD_AUDIO_STREAM_V2_PD_CLOSE_20260829 */
+    AuroraPdCloseCached(fp);
+#endif
     fclose(fp->file);
   }
   else if (fp->type == PMT_ZIP)

@@ -479,6 +479,25 @@ libretro_vfs_implementation_file *retro_vfs_file_open_impl(
          if (stream->fp)
             setvbuf(stream->fp, stream->buf, _IOFBF, 0x4000);
       }
+#elif defined(PS2)
+      /* AURORA_CD_AUDIO_STREAM_V1_PD_VFS_20260829
+       * PicoDrive is built with USE_LIBRETRO_VFS on Aurora.  At the emulation
+       * layer FILE is therefore RFILE, but here stream->fp is the actual
+       * newlib FILE*.  Install read-ahead at this layer, before any read/seek.
+       *
+       * stream->buf is already owned and freed by
+       * retro_vfs_file_close_impl(), so no pm_file ownership hack is needed. */
+      if (stream->scheme != VFS_SCHEME_CDROM && stream->fp)
+      {
+         const size_t bufsize = 32 * 1024;
+         stream->buf = (char*)malloc(bufsize);
+         if (stream->buf &&
+             setvbuf(stream->fp, stream->buf, _IOFBF, bufsize) != 0)
+         {
+            free(stream->buf);
+            stream->buf = NULL;
+         }
+      }
 #endif
    }
    else
