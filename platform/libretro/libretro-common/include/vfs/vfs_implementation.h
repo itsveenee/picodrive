@@ -31,6 +31,11 @@
 
 RETRO_BEGIN_DECLS
 
+/* AURORA_CD_AUDIO_STREAM_V6_CD_VFS_HINT_20260829
+ * Internal PicoDrive/libretro-common hint. It is consumed only by the PS2
+ * fallback VFS implementation and never tested by the emulation frame path. */
+#define AURORA_PD_VFS_HINT_CD_STREAM (1U << 30)
+
 libretro_vfs_implementation_file *retro_vfs_file_open_impl(const char *path, unsigned mode, unsigned hints);
 
 int retro_vfs_file_close_impl(libretro_vfs_implementation_file *stream);

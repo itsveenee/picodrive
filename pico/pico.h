@@ -220,7 +220,10 @@ typedef enum
 	PMT_UNCOMPRESSED = 0,
 	PMT_ZIP,
 	PMT_CSO,
-	PMT_CHD
+	PMT_CHD,
+	/* AURORA_CD_AUDIO_STREAM_V6_CD_ONLY_TYPE_20260829
+	 * Appended so existing pm_type numeric values remain unchanged. */
+	PMT_CD_UNCOMPRESSED
 } pm_type;
 typedef struct
 {
@@ -231,6 +234,7 @@ typedef struct
 	char ext[4];
 } pm_file;
 pm_file *pm_open(const char *path);
+pm_file *pm_open_cd(const char *path); /* AURORA_CD_AUDIO_STREAM_V6_CD_OPEN_API_20260829 */
 void     pm_sectorsize(int length, pm_file *stream);
 size_t   pm_read(void *ptr, size_t bytes, pm_file *stream);
 size_t   pm_read_audio(void *ptr, size_t bytes, pm_file *stream);

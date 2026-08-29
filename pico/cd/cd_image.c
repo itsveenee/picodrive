@@ -15,6 +15,19 @@
 #pragma GCC diagnostic ignored "-Wformat-truncation"
 #endif
 
+/* AURORA_CD_AUDIO_STREAM_V6_AUDIO_FILE_OPEN_20260829
+ * Preserve the V3/V1 32 KiB VFS buffering for Sega CD MP3/OGG tracks only.
+ * Selection occurs at file-open time; no emulation-time hardware check. */
+static FILE *aurora_cd_fopen(const char *fname)
+{
+#if defined(RENDER_GSKIT_PS2) && defined(USE_LIBRETRO_VFS)
+  return filestream_open(fname, RETRO_VFS_FILE_ACCESS_READ,
+                         AURORA_PD_VFS_HINT_CD_STREAM);
+#else
+  return fopen(fname, "rb");
+#endif
+}
+
 static int handle_mp3(const char *fname, int index)
 {
   track_t *track = &cdd.toc.tracks[index];
@@ -22,7 +35,7 @@ static int handle_mp3(const char *fname, int index)
   int kBps;
   int fs, ret;
 
-  tmp_file = fopen(fname, "rb");
+  tmp_file = aurora_cd_fopen(fname);
   if (tmp_file == NULL)
     return -1;
 
@@ -60,7 +73,7 @@ static int handle_ogg(const char *fname, int index)
   FILE *tmp_file;
   int fs;
 
-  tmp_file = fopen(fname, "rb");
+  tmp_file = aurora_cd_fopen(fname);
   if (tmp_file == NULL)
     return -1;
 
@@ -133,7 +146,8 @@ int load_cd_image(const char *cd_img_name, int *type)
       *type = cue_data->tracks[1].type;
   }
 
-  pmf = pm_open(cd_img_name);
+  /* AURORA_CD_AUDIO_STREAM_V6_TRACK_OPEN_20260829 */
+  pmf = pm_open_cd(cd_img_name);
   if (pmf == NULL)
   {
     if (cue_data != NULL)
@@ -188,7 +202,7 @@ int load_cd_image(const char *cd_img_name, int *type)
       }
       else if (cue_data->tracks[n].fname != NULL)
       {
-        pm_file *f = pm_open(cue_data->tracks[n].fname);
+        pm_file *f = pm_open_cd(cue_data->tracks[n].fname);
         if (f != NULL)
         {
           // assume raw, ignore header for wav..

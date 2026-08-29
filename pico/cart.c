@@ -23,13 +23,18 @@ static int rom_alloc_size;
 
 #if defined(RENDER_GSKIT_PS2)
 /* AURORA_CD_AUDIO_STREAM_V2_PD_CACHE_20260829
+ * AURORA_CD_AUDIO_STREAM_V4_PD_REFILL32_20260829
+ * AURORA_CD_AUDIO_STREAM_V5_PD_REFILL64_20260829
+ * AURORA_CD_AUDIO_STREAM_V6_V3_BASELINE_128K_20260829
  *
- * USB mass:/ latency is paid per filesystem transaction, while Sega CD raw
- * CDDA reaches pm_read_audio() in small frame-sized pieces. Keep one shared
- * 128 KiB read-ahead window and a logical position per uncompressed pm_file.
+ * Real-PS2 reference point:
+ *   V3 128 KiB = best observed overall behaviour so far: gameplay/audio are
+ *   smooth between refills, with one larger synchronous stall at refill.
+ *   V4  32 KiB shortened video stalls but made CDDA stutter much more often.
+ *   V5  64 KiB was an intermediate experiment.
  *
- * The cache is intentionally shared instead of embedded in every track: CUE
- * sets may have many audio files and the PS2 only has 32 MiB RAM.
+ * V6 intentionally restores the V3 128 KiB logical window while isolating
+ * the entire experimental path to actual Sega CD track streams.
  */
 #define AURORA_PD_STREAM_CACHE_BYTES (128 * 1024)
 
@@ -60,8 +65,11 @@ static size_t AuroraPdReadCached(void *ptr, size_t bytes, pm_file *stream)
   out = (unsigned char *)ptr;
   total = 0;
 
-  /* Big one-shot cartridge/media reads should not bounce through the shared
-   * cache. Reposition to the logical byte and read directly. */
+  /* AURORA_CD_AUDIO_STREAM_V4_PD_DIRECT_THRESHOLD_20260829
+   * AURORA_CD_AUDIO_STREAM_V5_PD_THRESHOLD32_20260829
+   * AURORA_CD_AUDIO_STREAM_V6_PD_THRESHOLD64_20260829
+   * V3 geometry restored: the 128 KiB cache keeps a 64 KiB direct-read
+   * threshold. CDDA/sector-sized reads remain cached. */
   if (bytes >= (AURORA_PD_STREAM_CACHE_BYTES / 2))
   {
     size_t got;
@@ -314,11 +322,15 @@ struct chd_struct {
 };
 #endif
 
-pm_file *pm_open(const char *path)
+static pm_file *pm_open_internal(const char *path, int cd_stream)
 {
   pm_file *file = NULL;
   const char *ext;
   FILE *f;
+
+  /* AURORA_CD_AUDIO_STREAM_V6_CD_OPEN_IMPL_20260829
+   * cd_stream is resolved by the caller at media-open time, never per frame. */
+  (void)cd_stream;
 
   if (path == NULL)
     return NULL;
@@ -489,7 +501,17 @@ chd_failed:
 #endif
 
   /* not a zip, treat as uncompressed file */
+#if defined(RENDER_GSKIT_PS2) && defined(USE_LIBRETRO_VFS)
+  /* AURORA_CD_AUDIO_STREAM_V6_CD_OPEN_HINT_20260829
+   * The hint reaches setvbuf before libretro-common's first size/seek pass. */
+  if (cd_stream)
+    f = filestream_open(path, RETRO_VFS_FILE_ACCESS_READ,
+                        AURORA_PD_VFS_HINT_CD_STREAM);
+  else
+    f = fopen(path, "rb");
+#else
   f = fopen(path, "rb");
+#endif
   if (f == NULL) return NULL;
 
   file = calloc(1, sizeof(*file));
@@ -501,13 +523,21 @@ chd_failed:
   file->file  = f;
   file->param = NULL;
   file->size  = ftell(f);
+#if defined(RENDER_GSKIT_PS2)
+  /* AURORA_CD_AUDIO_STREAM_V6_CD_ONLY_ASSIGN_20260829 */
+  file->type  = cd_stream ? PMT_CD_UNCOMPRESSED : PMT_UNCOMPRESSED;
+#else
   file->type  = PMT_UNCOMPRESSED;
+#endif
   strncpy(file->ext, ext, sizeof(file->ext) - 1);
   fseek(f, 0, SEEK_SET);
 
 #if defined(RENDER_GSKIT_PS2)
   /* AURORA_CD_AUDIO_STREAM_V2_PD_STATE_20260829
-   * Tiny per-file state; the 128 KiB data window itself is global/shared. */
+   * AURORA_CD_AUDIO_STREAM_V6_CD_ONLY_STATE_20260829
+   * Tiny state exists only for a PS2 Sega CD uncompressed track. The shared
+   * data window is the restored V3 128 KiB cache. */
+  if (cd_stream)
   {
     AuroraPdStreamState *state =
       (AuroraPdStreamState *)calloc(1, sizeof(*state));
@@ -526,6 +556,21 @@ chd_failed:
 #endif
 
   return file;
+}
+
+pm_file *pm_open(const char *path)
+{
+  return pm_open_internal(path, 0);
+}
+
+pm_file *pm_open_cd(const char *path)
+{
+  /* AURORA_CD_AUDIO_STREAM_V6_CD_OPEN_WRAPPER_20260829 */
+#if defined(RENDER_GSKIT_PS2)
+  return pm_open_internal(path, 1);
+#else
+  return pm_open_internal(path, 0);
+#endif
 }
 
 void pm_sectorsize(int length, pm_file *stream)
@@ -618,14 +663,21 @@ size_t pm_read(void *ptr, size_t bytes, pm_file *stream)
     return -1;
   else if (stream->type == PMT_UNCOMPRESSED)
   {
+    /* AURORA_CD_AUDIO_STREAM_V6_GENERIC_READ_ORIGINAL_20260829
+     * Generic cartridge/media file path: original PicoDrive behaviour. */
+    ret = fread(ptr, 1, bytes, stream->file);
+  }
 #if defined(RENDER_GSKIT_PS2)
-    /* AURORA_CD_AUDIO_STREAM_V2_PD_READ_20260829 */
+  else if (stream->type == PMT_CD_UNCOMPRESSED)
+  {
+    /* AURORA_CD_AUDIO_STREAM_V2_PD_READ_20260829
+     * AURORA_CD_AUDIO_STREAM_V6_CD_ONLY_READ_20260829 */
     if (stream->param)
       ret = (int)AuroraPdReadCached(ptr, bytes, stream);
     else
-#endif
       ret = fread(ptr, 1, bytes, stream->file);
   }
+#endif
   else if (stream->type == PMT_ZIP)
   {
     struct zip_file *z = stream->file;
@@ -766,14 +818,21 @@ int pm_seek(pm_file *stream, long offset, int whence)
     return -1;
   else if (stream->type == PMT_UNCOMPRESSED)
   {
-#if defined(RENDER_GSKIT_PS2)
-    /* AURORA_CD_AUDIO_STREAM_V2_PD_SEEK_20260829 */
-    if (stream->param)
-      return AuroraPdSeekCached(stream, offset, whence);
-#endif
+    /* AURORA_CD_AUDIO_STREAM_V6_GENERIC_SEEK_ORIGINAL_20260829 */
     fseek(stream->file, offset, whence);
     return ftell(stream->file);
   }
+#if defined(RENDER_GSKIT_PS2)
+  else if (stream->type == PMT_CD_UNCOMPRESSED)
+  {
+    /* AURORA_CD_AUDIO_STREAM_V2_PD_SEEK_20260829
+     * AURORA_CD_AUDIO_STREAM_V6_CD_ONLY_SEEK_20260829 */
+    if (stream->param)
+      return AuroraPdSeekCached(stream, offset, whence);
+    fseek(stream->file, offset, whence);
+    return ftell(stream->file);
+  }
+#endif
   else if (stream->type == PMT_ZIP)
   {
     struct zip_file *z = stream->file;
@@ -852,12 +911,18 @@ int pm_close(pm_file *fp)
 
   if (fp->type == PMT_UNCOMPRESSED)
   {
-#if defined(RENDER_GSKIT_PS2)
-    /* AURORA_CD_AUDIO_STREAM_V2_PD_CLOSE_20260829 */
-    AuroraPdCloseCached(fp);
-#endif
+    /* AURORA_CD_AUDIO_STREAM_V6_GENERIC_CLOSE_ORIGINAL_20260829 */
     fclose(fp->file);
   }
+#if defined(RENDER_GSKIT_PS2)
+  else if (fp->type == PMT_CD_UNCOMPRESSED)
+  {
+    /* AURORA_CD_AUDIO_STREAM_V2_PD_CLOSE_20260829
+     * AURORA_CD_AUDIO_STREAM_V6_CD_ONLY_CLOSE_20260829 */
+    AuroraPdCloseCached(fp);
+    fclose(fp->file);
+  }
+#endif
   else if (fp->type == PMT_ZIP)
   {
     struct zip_file *z = fp->file;
