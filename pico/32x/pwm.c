@@ -8,6 +8,24 @@
  */
 #include "../pico_int.h"
 
+/* AURORA_V4_4_BUILD_FIX_32X_VIDEO_FIRST_20260830
+ * 32X ONLY. This never touches MD/MCD/SMS/GG/Pico.
+ * The flag suppresses only sample resampling/mixing. consume_fifo() still
+ * runs first, preserving PWM FIFO state and IRQ/game timing. */
+#if defined(RENDER_GSKIT_PS2)
+static int s_Aurora32xAudioSacrifice;
+
+void PicoDriveAurora_Set32xAudioSacrifice(int enabled)
+{
+  s_Aurora32xAudioSacrifice = enabled ? 1 : 0;
+}
+
+int PicoDriveAurora_32xAudioSacrifice(void)
+{
+  return s_Aurora32xAudioSacrifice;
+}
+#endif
+
 static struct {
   int cycles;
   unsigned mult;
@@ -273,6 +291,12 @@ void p32x_pwm_update(s32 *buf32, int length, int stereo)
   int xmd;
 
   consume_fifo(NULL, SekCyclesDone());
+
+#if defined(RENDER_GSKIT_PS2)
+  /* Video recovery may drop PWM samples, never PWM timing/IRQs. */
+  if (s_Aurora32xAudioSacrifice)
+    goto out;
+#endif
 
   xmd = Pico32x.regs[0x30 / 2] & 0x0f;
   if (xmd == 0 || xmd == 0x06 || xmd == 0x09 || xmd == 0x0f)

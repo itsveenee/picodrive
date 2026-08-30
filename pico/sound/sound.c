@@ -17,6 +17,15 @@
 #include "resampler.h"
 #include "mix.h"
 
+#if defined(RENDER_GSKIT_PS2)
+/* AURORA_CD_MUSIC_REDBOOK_V3_20260830 */
+int PicoDriveAurora_CdMusicEnabled(void);
+/* AURORA_V4_9_SEGACD_CDDA_CHASE_REVIVE_20260830 */
+void PicoDriveAurora_PrimeCdAudio(pm_file *stream);
+/* AURORA_V4_4_BUILD_FIX_32X_VIDEO_FIRST_20260830 */
+int PicoDriveAurora_32xAudioSacrifice(void);
+#endif
+
 #define YM2612_CH6PAN   0x1b6   // panning register for channel 6 (used for DAC)
 
 void (*PsndMix_32_to_16)(s16 *dest, s32 *src, int count) = mix_32_to_16_stereo;
@@ -512,6 +521,17 @@ static void cdda_raw_update(s32 *buffer, int length, int stereo)
   while (Pico_mcd->m.cdda_lba_offset >= 2352/4)
     Pico_mcd->m.cdda_lba_offset -= 2352/4;
 
+#if defined(RENDER_GSKIT_PS2)
+  /* AURORA_CD_MUSIC_REDBOOK_V3_20260830
+   * OFF advances Red Book time with a logical seek only: no fread,
+   * no refill request and no CDDA mix. PCM/FM/PSG are untouched. */
+  if (!PicoDriveAurora_CdMusicEnabled())
+  {
+    pm_seek(Pico_mcd->cdda_stream, cdda_bytes, SEEK_CUR);
+    return;
+  }
+#endif
+
   ret = pm_read_audio(cdda_out_buffer, cdda_bytes, Pico_mcd->cdda_stream);
   if (ret < cdda_bytes) {
     memset((char *)cdda_out_buffer + ret, 0, cdda_bytes - ret);
@@ -530,6 +550,15 @@ static void cdda_raw_update(s32 *buffer, int length, int stereo)
 
 void cdda_start_play(int lba_base, int lba_offset, int lb_len)
 {
+#if defined(RENDER_GSKIT_PS2)
+  /* AURORA_CD_MUSIC_REDBOOK_V3_20260830
+   * With CD music Off, do not initialise opaque MP3/OGG storage/decoders. */
+  if (!PicoDriveAurora_CdMusicEnabled() &&
+      (Pico_mcd->cdda_type == CT_MP3 ||
+       Pico_mcd->cdda_type == CT_OGG))
+    return;
+#endif
+
   if (Pico_mcd->cdda_type == CT_MP3)
   {
     int pos1024 = 0;
@@ -553,6 +582,12 @@ void cdda_start_play(int lba_base, int lba_offset, int lb_len)
     // skip headers, assume it's 44kHz stereo uncompressed
     pm_seek(Pico_mcd->cdda_stream, 44, SEEK_CUR);
   }
+
+#if defined(RENDER_GSKIT_PS2)
+  /* CDDA-only asynchronous head start. DATA tracks never enter here. */
+  if (PicoDriveAurora_CdMusicEnabled())
+    PicoDriveAurora_PrimeCdAudio(Pico_mcd->cdda_stream);
+#endif
 }
 
 void cdda_stop_play(void)
@@ -653,19 +688,34 @@ static int PsndRender(int offset, int length)
       && Pico_mcd->cdda_stream != NULL
       && (!(Pico_mcd->s68k_regs[0x36] & 1) || Pico_msd.state == 3))
   {
+#if defined(RENDER_GSKIT_PS2)
+    /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830
+     * Opaque MP3/OGG decoder I/O cannot be proven nonblocking here.
+     * Extreme policy therefore mutes it on PS2. Raw/WAV/CHD stay fail-soft. */
+    if (Pico_mcd->cdda_type != CT_MP3 &&
+        Pico_mcd->cdda_type != CT_OGG)
+      cdda_raw_update(buf32, length-offset, stereo);
+#else
     if (Pico_mcd->cdda_type == CT_MP3)
       mp3_update(buf32, length-offset, stereo);
     else if (Pico_mcd->cdda_type == CT_OGG)
       ogg_update(buf32, length-offset, stereo);
     else
       cdda_raw_update(buf32, length-offset, stereo);
+#endif
   }
 
   if ((PicoIn.AHW & PAHW_32X) && (PicoIn.opt & POPT_EN_PWM))
     p32x_pwm_update(buf32, length-offset, stereo);
 
   // convert + limit to normal 16bit output
+#if defined(RENDER_GSKIT_PS2)
+  if (PicoIn.sndOut &&
+      !((PicoIn.AHW & PAHW_32X) &&
+        PicoDriveAurora_32xAudioSacrifice()))
+#else
   if (PicoIn.sndOut)
+#endif
     PsndMix_32_to_16(PicoIn.sndOut+(offset<<stereo), buf32, length-offset);
 
   pprof_end(sound);
@@ -679,7 +729,13 @@ PICO_INTERNAL void PsndGetSamples(int y)
 
   curr_pos  = PsndRender(0, Pico.snd.len_use);
 
+#if defined(RENDER_GSKIT_PS2)
+  if (PicoIn.writeSound && PicoIn.sndOut &&
+      !((PicoIn.AHW & PAHW_32X) &&
+        PicoDriveAurora_32xAudioSacrifice()))
+#else
   if (PicoIn.writeSound && PicoIn.sndOut)
+#endif
     PicoIn.writeSound(curr_pos * ((PicoIn.opt & POPT_EN_STEREO) ? 4 : 2));
   // clear sound buffer
   PsndClear();
@@ -744,3 +800,5 @@ PICO_INTERNAL void PsndGetSamplesMS(int y)
 }
 
 // vim:shiftwidth=2:ts=2:expandtab
+
+/* AURORA_V4_9_SEGACD_CDDA_CHASE_REVIVE_20260830 */
