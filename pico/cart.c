@@ -58,6 +58,7 @@ extern int CreateThread(void *);
 extern int DeleteThread(int);
 extern int StartThread(int, void *);
 extern int ReferThreadStatus(int, void *);
+extern int DelayThread(unsigned int);
 extern void *_gp;
 
 #define AURORA_EE_SYNC() __asm__ __volatile__("sync")
@@ -835,6 +836,76 @@ static void AuroraPdFxPoll(void)
     s_AuroraPdFxBufStart[idx] + (long)got;
   AURORA_EE_SYNC();
 }
+
+/* AURORA_V4_17_SAFE_CD_GAME_SWITCH_QUIESCE_20260830
+ *
+ * Game switching must never enter PicoExitMCD()/pm_close() while the private
+ * CDDA fileXio client still owns a NOWAIT read.  The normal control worker
+ * historically resolves a track change with AuroraCdFxWaitRead(), which is
+ * correct during playback but can become an unbounded teardown wait.
+ *
+ * This boundary is intentionally conservative:
+ *   - stop host-side CDDA refill requests;
+ *   - retire the unused legacy async request generation;
+ *   - poll the private READ only (never WaitSema on the main thread);
+ *   - once no READ is pending, ask the control worker to CLOSE its private fd;
+ *   - yield to the higher-priority worker for at most 250 ms.
+ *
+ * Success means the private transport is fully idle before cdd_unload().
+ * Timeout means "do not switch yet": the caller keeps the current core alive
+ * and may retry later.  No thread is killed and no in-flight DMA/RPC buffer is
+ * freed underneath the IOP.
+ */
+int PicoDriveAurora_PrepareGameSwitch(void)
+{
+  int i;
+  int close_queued = 0;
+
+  s_AuroraPdCdAudioSafeWindow = 0;
+  s_AuroraPdCdAudioRefillRequested = 0;
+  s_AuroraPdCdAudioPendingStream = NULL;
+
+  /* Currently dormant for CDDA, but invalidate it as part of the same
+   * lifetime boundary so an older/future producer cannot survive a switch. */
+  AuroraPdAsyncCancelAll();
+
+  for (i = 0; i < 250; ++i)
+  {
+    if (!s_AuroraPdFxControlBusy)
+    {
+      /* Poll is strictly non-blocking.  If the callback has completed,
+       * this retires s_AuroraPdFxPendingIndex and its buffer generation. */
+      AuroraPdFxPoll();
+
+      if (!s_AuroraPdFxControlBusy &&
+          s_AuroraPdFxPendingIndex < 0 &&
+          s_AuroraPdFxAppliedSeq == s_AuroraPdFxReqSeq)
+      {
+        if (s_AuroraPdFxOwnerSerial == 0 &&
+            s_AuroraPdFxReqSerial == 0)
+          return 1;
+
+        /* Queue CLOSE only after the data-plane READ is known complete.
+         * Therefore AuroraPdFxThread cannot enter AuroraCdFxWaitRead() for
+         * this game-switch request. */
+        if (!close_queued)
+        {
+          AuroraPdFxQueue(0, NULL, 0);
+          close_queued = 1;
+        }
+      }
+    }
+
+    /* Never spin against the worker.  It is created one EE priority above
+     * the caller, so this also gives OPEN/CLOSE and the completion callback
+     * a chance to finish. */
+    DelayThread(1000);
+  }
+
+  return 0;
+}
+
+/* AURORA_V4_17_SAFE_CD_GAME_SWITCH_QUIESCE_20260830 */
 
 static long AuroraPdFxFurthestCoverage(void)
 {
