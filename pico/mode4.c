@@ -10,6 +10,9 @@
  * See COPYING file in the top-level directory.
  */
 #include "pico_int.h"
+
+/* AURORA_SWC_FLOPPY_V1_20260831 / AURORA_SMS_YSJ_VDP1_V1_20260831 */
+extern int PicoSmsYsjQuirk;
 #include <platform/common/upscale.h>
 
 #if defined(RENDER_GSKIT_PS2)
@@ -302,8 +305,10 @@ static void DrawDisplayM4(int scanline)
   } else {
     while (line >= 224) line -= 224;
     nametab += (pv->reg[2] & 0x0e) << (10-1);
-    // old SMS only, masks line:7 with reg[2]:0 for address calculation
-    //if ((pv->reg[2] & 0x01) == 0) line &= 0x7f;
+    // old 315-5124 SMS VDP masks line:7 with reg[2]:0.
+    // Ys (Japan) is the commercial title known to depend on it.
+    if (PicoSmsYsjQuirk && (pv->reg[2] & 0x01) == 0)
+      line &= 0x7f;
   }
   nametab2 = nametab + ((scanline>>3) << (6-1));
   nametab  = nametab + ((line>>3)     << (6-1));

@@ -26,6 +26,11 @@ extern void YM2413_dataWrite(unsigned data);
 extern unsigned sprites_status; // TODO put in some hdr file!
 extern int sprites_zoom, xscroll;
 
+/* AURORA_SWC_FLOPPY_V1_20260831 / AURORA_SMS_YSJ_VDP1_V1_20260831
+ * Ys (Japan) depends on 315-5124 VDP tilemap mirroring.
+ * Set once per reset from the same cartridge ID used by MiSTer PR #132. */
+int PicoSmsYsjQuirk = 0;
+
 static unsigned char vdp_data_read(void)
 {
   struct PicoVideo *pv = &Pico.video;
@@ -1090,6 +1095,13 @@ void PicoResetMS(void)
   }
 
   z80_reset();
+
+  /* Ys (Japan): bytes 7FFC..7FFF = 13 70 01 4F.
+   * Exact ROM identity only; all other SMS/GG software keeps current VDP behavior. */
+  PicoSmsYsjQuirk =
+    Pico.rom != NULL && Pico.romsize >= 0x8000 &&
+    Pico.rom[0x7ffc] == 0x13 && Pico.rom[0x7ffd] == 0x70 &&
+    Pico.rom[0x7ffe] == 0x01 && Pico.rom[0x7fff] == 0x4f;
   PsndReset(); // pal must be known here
   PicoCloseTape();
 
