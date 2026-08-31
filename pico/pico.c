@@ -11,6 +11,7 @@
 #include "pico_int.h"
 #include "sound/ym2612.h"
 #include "sound/vgm.h"
+#include <zlib.h>
 
 struct Pico Pico;
 struct PicoMem PicoMem;
@@ -75,6 +76,83 @@ void PicoExit(void)
   pevt_dump();
 }
 
+
+/* AURORA_MD_PRE_TMSS_CRC_V1_20260831
+ *
+ * A few early Mega Drive/Genesis cartridges predate TMSS (or do not perform
+ * the later TMSS unlock sequence correctly). PicoDrive normally leaves the
+ * VDP in the power-up state produced by the TMSS BIOS. For verified affected
+ * dumps, expose a pre-TMSS power-up state instead.
+ *
+ * CRC32 is calculated over the logical/raw ROM byte order. PicoDrive keeps
+ * cartridge words byteswapped internally on little-endian hosts, hence MEM_BE2.
+ * Plain MD cartridges only: never touch Sega CD, 32X, SMS/GG or Pico.
+ */
+static unsigned int AuroraMdRawRomCrc32(void)
+{
+  unsigned char buf[2048];
+  unsigned int pos = 0;
+  uLong crc;
+
+  if (Pico.rom == NULL || Pico.romsize == 0)
+    return 0;
+
+  crc = crc32(0L, Z_NULL, 0);
+
+  while (pos < Pico.romsize)
+  {
+    unsigned int i;
+    unsigned int n = Pico.romsize - pos;
+    if (n > sizeof(buf))
+      n = sizeof(buf);
+
+    for (i = 0; i < n; i++)
+      buf[i] = Pico.rom[MEM_BE2(pos + i)];
+
+    crc = crc32(crc, buf, n);
+    pos += n;
+  }
+
+  return (unsigned int)crc;
+}
+
+static int AuroraMdNeedsPreTmssPowerup(void)
+{
+  unsigned int crc;
+
+  if (Pico.rom == NULL || Pico.romsize == 0)
+    return 0;
+
+  if (PicoIn.AHW & (PAHW_MCD | PAHW_32X | PAHW_SMS | PAHW_PICO))
+    return 0;
+
+  crc = AuroraMdRawRomCrc32();
+
+  switch (crc)
+  {
+    /* US / unlicensed early cartridges */
+    case 0xACD9F5FCu: /* Budokan - The Martial Spirit (USA) */
+    case 0xB1DE7D5Eu: /* Ishido - The Way of Stones (USA) (Unl) */
+    case 0x9F19D6DFu: /* Onslaught (USA, Europe) (Unl) */
+    case 0xBD74B31Eu: /* Populous (USA) (Unl) */
+    case 0xED5D12EAu: /* Zany Golf (USA) (Unl/Rev 0) */
+
+    /* Japanese launch / revision-0 cartridges */
+    case 0xEDC0FB28u: /* Space Harrier II (Japan) (Launch Cart) */
+    case 0x8BD77836u: /* Super Thunder Blade (Japan) (Launch Cart) */
+    case 0x1B7C96C0u: /* Juuouki (Japan) Rev 0 */
+    case 0x2453350Cu: /* Osomatsu-kun Hachamecha Gekijou (Japan) */
+    case 0x8A5ED856u: /* Alex Kidd - Tenkuu Majou (Japan) */
+    case 0xBEC8EB5Au: /* Phantasy Star II - Kaerazaru Toki no Owari ni (Japan) */
+    case 0xD50A166Fu: /* Super Daisenryaku (Japan) Rev 0 */
+    case 0x4FF37E66u: /* After Burner II (Japan) */
+      return 1;
+
+    default:
+      return 0;
+  }
+}
+
 void PicoPower(void)
 {
   Pico.m.frame_count = 0;
@@ -100,10 +178,21 @@ void PicoPower(void)
 
   PicoReset();
 
-  // powerup default VDP register values from TMSS BIOS
-  Pico.video.reg[0] = Pico.video.reg[1] = 0x04;
-  Pico.video.reg[0xc] = 0x81;
-  Pico.video.reg[0xf] = 0x02;
+  /* AURORA_MD_PRE_TMSS_CRC_V1_20260831 */
+  if (AuroraMdNeedsPreTmssPowerup())
+  {
+    /* Hardware revision 0 + untouched/reset VDP registers = pre-TMSS MD.
+       PicoReset() already established region/timing; preserve those bits. */
+    Pico.m.hardware &= 0xf0;
+  }
+  else
+  {
+    // powerup default VDP register values from TMSS BIOS
+    Pico.video.reg[0] = Pico.video.reg[1] = 0x04;
+    Pico.video.reg[0xc] = 0x81;
+    Pico.video.reg[0xf] = 0x02;
+  }
+
   SATaddr = 0x0000;
   SATmask = ~0x3ff;
 }

@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <dirent.h>
 #include <errno.h>
 #ifdef __MACH__
 #include <libkern/OSCacheControl.h>
@@ -1361,6 +1362,30 @@ static const char *find_bios(int *region, const char *cd_fname)
    static char path[256];
    int i, count;
    FILE *f = NULL;
+
+   /* AURORA_SEGA_CD_REGIONFREE_BIOS_V1: prefer first readable region-free BIOS in SYSTEM. */
+   {
+      const char *dir = NULL;
+      if (environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &dir) && dir) {
+         DIR *d = opendir(dir);
+         if (d != NULL) {
+            struct dirent *ent;
+            while ((ent = readdir(d)) != NULL) {
+               if (strcasestr(ent->d_name, "regionfree") || strcasestr(ent->d_name, "region_free")) {
+                  snprintf(path, sizeof(path), "%s%c%s", dir, SLASH, ent->d_name);
+                  f = fopen(path, "rb");
+                  if (f != NULL) {
+                     fclose(f);
+                     closedir(d);
+                     if (log_cb) log_cb(RETRO_LOG_INFO, "using region-free bios: %s\n", path);
+                     return path;
+                  }
+               }
+            }
+            closedir(d);
+         }
+      }
+   }
 
    if (*region == 4) { // US
       files = biosfiles_us;
