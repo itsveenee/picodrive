@@ -14,7 +14,6 @@
  */
 #include "pico_int.h"
 #include "memory.h"
-#include "smd.h" /* AURORA_SUPER_MAGIC_DRIVE_V1_20260902 */
 #include "sound/sn76496.h"
 #include "sound/emu2413/emu2413.h"
 
@@ -1110,11 +1109,7 @@ void PicoResetMS(void)
   Pico.ms.fm_ctl = 0xff;
 
   // reset memory mapping
-  /* AURORA_SUPER_MAGIC_DRIVE_V1_20260902 */
-  if (PicoDriveAurora_SmdIsActive())
-    PicoDriveAurora_SmdMemSetupMS();
-  else
-    PicoMemSetupMS();
+  PicoMemSetupMS();
 
   // BIOS, VDP intialisation
   Pico.video.reg[0] = 0x36;

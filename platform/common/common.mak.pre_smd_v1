@@ -89,7 +89,7 @@ SRCS_COMMON += $(R)pico/pico.c $(R)pico/cart.c $(R)pico/memory.c \
 	$(R)pico/state.c $(R)pico/sek.c $(R)pico/z80if.c \
 	$(R)pico/videoport.c $(R)pico/draw2.c $(R)pico/draw.c \
 	$(R)pico/mode4.c $(R)pico/misc.c $(R)pico/eeprom.c \
-	$(R)pico/patch.c $(R)pico/debug.c $(R)pico/media.c $(R)pico/smd.c
+	$(R)pico/patch.c $(R)pico/debug.c $(R)pico/media.c
 # SMS
 ifneq "$(no_sms)" "1"
 SRCS_COMMON += $(R)pico/sms.c
