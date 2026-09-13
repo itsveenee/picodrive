@@ -2105,6 +2105,20 @@ static int PicoCartCalcAllocSize(int filesize, int is_sms)
   return alloc_size;
 }
 
+/* AURORA_SSF2_PCE_MENU_FIX_V2_20260913_SSF2_CORE
+ * Exact PS2 borrowed-buffer exception for the real 5 MiB SSF2 cart.
+ * carthw.cfg identifies it by this same title at 0x150; its mapper selects
+ * only existing 512 KiB banks, so generic 5 MiB -> 8 MiB pow2 backing is
+ * unnecessary. 0x40 tail bytes cover PicoCartInsert's 4-byte guard. */
+static int PicoCartPs2CompactSsf2(const unsigned char *rom,
+  unsigned int romsize, int is_sms)
+{
+  static const char title[] =
+    "SUPER STREET FIGHTER2 The New Challengers";
+  if (is_sms || rom == NULL || romsize != 0x500000U) return 0;
+  return memcmp(rom + 0x150, title, sizeof(title) - 1) == 0;
+}
+
 void *PicoCartAlloc(int filesize, int is_sms)
 {
   unsigned char *rom;
@@ -2139,7 +2153,9 @@ int PicoCartLoad(pm_file *f, const unsigned char *rom, unsigned int romsize,
 
   // Allocate space for the rom plus padding
 #if defined(RENDER_GSKIT_PS2)
-  borrowed_alloc_size = PicoCartCalcAllocSize(size, is_sms);
+  /* AURORA_SSF2_PCE_MENU_FIX_V2_20260913_SSF2_CORE */
+  borrowed_alloc_size = PicoCartPs2CompactSsf2(rom, romsize, is_sms)
+    ? 0x500040 : PicoCartCalcAllocSize(size, is_sms);
   ps2_rom_borrowed = 0;
   ps2_borrowed_capacity = 0;
 
