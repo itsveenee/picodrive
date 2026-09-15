@@ -2119,6 +2119,48 @@ static int PicoCartPs2CompactSsf2(const unsigned char *rom,
   return memcmp(rom + 0x150, title, sizeof(title) - 1) == 0;
 }
 
+
+/* AURORA_LARGE_MD_COMPACT_CORE_V2_20260914
+ * Only honor compact backing when Aurora explicitly offered a smaller buffer
+ * than PicoCartCalcAllocSize(). The generic allocator for every other port,
+ * cart and hardware family is unchanged. Large non-detected MD carts use the
+ * standard/SSF2 mapper, and have_bank() rejects sources >= Pico.romsize.
+ */
+static int PicoCartPs2CompactLargeMd(const unsigned char *rom,
+  unsigned int romsize, int is_sms, int generic_alloc_size)
+{
+  unsigned int size, compact;
+
+  if (is_sms || rom == NULL || romsize <= 0x400000U ||
+      rom != ps2_external_rom || ps2_external_rom_capacity == 0 ||
+      generic_alloc_size <= 0 ||
+      ps2_external_rom_capacity >= (unsigned int)generic_alloc_size)
+    return 0;
+
+  if ((romsize & 0x3fffU) == 0x0200U)
+    return 0;
+
+  if (romsize >= 0x109U &&
+      (!memcmp(rom + 0x100U, "SEGA 32X", 8) ||
+       !memcmp(rom + 0x100U, "SEGA PICO", 9)))
+    return 0;
+
+  size = (romsize + 3U) & ~3U;
+  compact = (size + 0x7ffffU) & ~0x7ffffU;
+  if (compact < size)
+    return 0;
+  if (compact - size < 0x40U)
+  {
+    if (compact > 0xffffffffU - 0x40U)
+      return 0;
+    compact += 0x40U;
+  }
+
+  if (compact > ps2_external_rom_capacity)
+    return 0;
+  return (int)compact;
+}
+
 void *PicoCartAlloc(int filesize, int is_sms)
 {
   unsigned char *rom;
@@ -2154,8 +2196,15 @@ int PicoCartLoad(pm_file *f, const unsigned char *rom, unsigned int romsize,
   // Allocate space for the rom plus padding
 #if defined(RENDER_GSKIT_PS2)
   /* AURORA_SSF2_PCE_MENU_FIX_V2_20260913_SSF2_CORE */
-  borrowed_alloc_size = PicoCartPs2CompactSsf2(rom, romsize, is_sms)
-    ? 0x500040 : PicoCartCalcAllocSize(size, is_sms);
+  {
+    int generic_alloc_size = PicoCartCalcAllocSize(size, is_sms);
+    int compact_large_md = PicoCartPs2CompactLargeMd(
+      rom, romsize, is_sms, generic_alloc_size);
+
+    borrowed_alloc_size = PicoCartPs2CompactSsf2(rom, romsize, is_sms)
+      ? 0x500040
+      : (compact_large_md > 0 ? compact_large_md : generic_alloc_size);
+  }
   ps2_rom_borrowed = 0;
   ps2_borrowed_capacity = 0;
 
