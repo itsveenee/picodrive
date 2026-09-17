@@ -49,6 +49,21 @@ unsigned int pcd_pcm_read(unsigned int a)
   return d & 0xff;
 }
 
+#if defined(RENDER_GSKIT_PS2)
+/* AURORA_ACCURACY_PERF_RECOVERY_V6_SEGACD_SAFE_20260917
+ * AURORA_SEGACD_PCM_SIGNMAG_BRANCHLESS_V6_20260917
+ *
+ * Exact branchless form of:
+ *     if (smp & 0x80) smp = -(smp & 0x7f);
+ * The 0xFF loop marker is handled before this helper, unchanged.
+ */
+static INLINE int AuroraSegaCdPcmDecodeSignMagnitude(int smp)
+{
+  const int sign_mask = -(smp >> 7);
+  return ((smp & 0x7f) ^ sign_mask) - sign_mask;
+}
+#endif
+
 void pcd_pcm_sync(unsigned int to)
 {
   unsigned int cycles = Pico_mcd->pcm.update_cycles;
@@ -71,8 +86,30 @@ void pcd_pcm_sync(unsigned int to)
   enabled = Pico_mcd->pcm.enabled;
   if (!(Pico_mcd->pcm.control & 0x80))
     enabled = 0;
+#if defined(RENDER_GSKIT_PS2)
+  if (!enabled)
+  {
+    if (!Pico_mcd->pcm_regs_dirty)
+      goto end;
+
+    /* AURORA_SEGACD_PCM_ALL_OFF_FASTPATH_V6_20260917
+     * With every channel off, the original loop can only reset channel
+     * addresses; it cannot write a sample. Do those eight required state
+     * updates directly and do not falsely mark an all-zero mix buffer dirty.
+     * If earlier PCM in this frame already made it dirty, that flag is left
+     * untouched so those earlier samples are still mixed normally. */
+    for (c = 0; c < 8; c++)
+    {
+      ch = &Pico_mcd->pcm.ch[c];
+      ch->addr = ch->regs[6] << (PCM_STEP_SHIFT + 8);
+    }
+    Pico_mcd->pcm_regs_dirty = 0;
+    goto end;
+  }
+#else
   if (!enabled && !Pico_mcd->pcm_regs_dirty)
     goto end;
+#endif
 
   out = Pico_mcd->pcm_mixbuf + Pico_mcd->pcm_mixpos * 2;
   Pico_mcd->pcm_mixbuf_dirty = 1;
@@ -89,9 +126,122 @@ void pcd_pcm_sync(unsigned int to)
 
     addr = ch->addr;
     inc = ch->regs[2] + (ch->regs[3]<<8);
-    mul_l = (int)ch->regs[0] * (ch->regs[1] & 0xf); 
+    mul_l = (int)ch->regs[0] * (ch->regs[1] & 0xf);
     mul_r = (int)ch->regs[0] * (ch->regs[1] >>  4);
 
+#if defined(RENDER_GSKIT_PS2)
+    {
+      /* The RF5C164 loop address is register state for the whole channel
+       * slice. Precomputing it changes no address or marker semantics. */
+      const unsigned int loop_addr =
+        ch->regs[4] + (ch->regs[5] << 8);
+
+      if (mul_l == 0 && mul_r == 0)
+      {
+        /* AURORA_SEGACD_PCM_ZERO_OUTPUT_FASTPATH_V6_20260917
+         * An enabled-but-muted channel still advances its address and obeys
+         * both levels of the 0xFF loop-marker rule. Audio math and output
+         * RMWs are provably zero, so do not perform them. */
+        for (s = 0; s < steps; s++)
+        {
+          smp = Pico_mcd->pcm_ram[addr >> PCM_STEP_SHIFT];
+
+          if (smp == 0xff)
+          {
+            addr = loop_addr;
+            smp = Pico_mcd->pcm_ram[addr];
+            addr <<= PCM_STEP_SHIFT;
+            if (smp == 0xff)
+              break;
+          }
+          else
+            addr = (addr + inc) & 0x07FFFFFF;
+        }
+      }
+      else if (mul_l == 0 || mul_r == 0)
+      {
+        /* AURORA_SEGACD_PCM_HARDPAN_FASTPATH_V6_20260917
+         * One side is mathematically zero. Preserve the nonzero side's
+         * exact multiply/shift and avoid the zero multiply plus output RMW. */
+        int *dst = out + (mul_l == 0);
+        const int mul = mul_l ? mul_l : mul_r;
+
+        for (s = 0; s < steps; s++)
+        {
+          smp = Pico_mcd->pcm_ram[addr >> PCM_STEP_SHIFT];
+
+          if (smp == 0xff)
+          {
+            addr = loop_addr;
+            smp = Pico_mcd->pcm_ram[addr];
+            addr <<= PCM_STEP_SHIFT;
+            if (smp == 0xff)
+              break;
+          }
+          else
+            addr = (addr + inc) & 0x07FFFFFF;
+
+          smp = AuroraSegaCdPcmDecodeSignMagnitude(smp);
+          *dst += (smp * mul) >> 5;
+          dst += 2;
+        }
+      }
+      else if (mul_l == mul_r)
+      {
+        /* AURORA_SEGACD_PCM_EQUAL_PAN_FASTPATH_V6_20260917
+         * Equal pan has identical operands on both sides. Compute the same
+         * product/rounding once and add that exact value to L and R. */
+        int *dst = out;
+
+        for (s = 0; s < steps; s++)
+        {
+          int mixed;
+
+          smp = Pico_mcd->pcm_ram[addr >> PCM_STEP_SHIFT];
+
+          if (smp == 0xff)
+          {
+            addr = loop_addr;
+            smp = Pico_mcd->pcm_ram[addr];
+            addr <<= PCM_STEP_SHIFT;
+            if (smp == 0xff)
+              break;
+          }
+          else
+            addr = (addr + inc) & 0x07FFFFFF;
+
+          smp = AuroraSegaCdPcmDecodeSignMagnitude(smp);
+          mixed = (smp * mul_l) >> 5;
+          *dst++ += mixed;
+          *dst++ += mixed;
+        }
+      }
+      else
+      {
+        int *dst = out;
+
+        for (s = 0; s < steps; s++)
+        {
+          smp = Pico_mcd->pcm_ram[addr >> PCM_STEP_SHIFT];
+
+          if (smp == 0xff)
+          {
+            addr = loop_addr;
+            smp = Pico_mcd->pcm_ram[addr];
+            addr <<= PCM_STEP_SHIFT;
+            if (smp == 0xff)
+              break;
+          }
+          else
+            addr = (addr + inc) & 0x07FFFFFF;
+
+          smp = AuroraSegaCdPcmDecodeSignMagnitude(smp);
+          *dst++ += (smp * mul_l) >> 5;
+          *dst++ += (smp * mul_r) >> 5;
+        }
+      }
+    }
+#else
     for (s = 0; s < steps; s++)
     {
       smp = Pico_mcd->pcm_ram[addr >> PCM_STEP_SHIFT];
@@ -113,6 +263,7 @@ void pcd_pcm_sync(unsigned int to)
       out[s*2  ] += (smp * mul_l) >> 5; // max 127 * 255 * 15 / 32 = 15180
       out[s*2+1] += (smp * mul_r) >> 5;
     }
+#endif
     ch->addr = addr;
   }
 

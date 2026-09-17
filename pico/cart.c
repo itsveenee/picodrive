@@ -107,258 +107,13 @@ static pm_file *s_AuroraPdStreamCacheOwner;
 static long s_AuroraPdStreamCacheStart;
 static size_t s_AuroraPdStreamCacheLength;
 
-/* AURORA_ASYNC_CDDA_VIDEO_ABSOLUTE_V4_20260830
- *
- * Strict producer/consumer window.
- *
- * - main/emulation thread: memcpy from READY bytes or emits silence.
- * - worker EE thread: owns a separate unbuffered FILE* and may block forever.
- * - main thread never WaitSema(), fread(), fseek() or waits for the worker.
- * - 8 KiB is deliberately small to bound filesystem-device monopolisation.
- * - worker is one priority level ABOVE the caller. Aurora's gsKit VBlank wait
- *   is a busy-spin, so a lower-priority worker would otherwise starve.
- */
-#define AURORA_PD_ASYNC_BYTES (256 * 1024)
-#define AURORA_PD_ASYNC_CHUNK (32 * 1024)
-#define AURORA_PD_ASYNC_REBASE_LAG (16 * 1024)
-
-static unsigned char s_AuroraPdAsyncBuffer[AURORA_PD_ASYNC_BYTES]
-  __attribute__((aligned(64)));
-static unsigned char s_AuroraPdAsyncStack[16 * 1024]
-  __attribute__((aligned(16)));
-
-static int s_AuroraPdAsyncThreadId = -1;
-static int s_AuroraPdAsyncSema = -1;
+/* AURORA_SEGACD_DEAD_ASYNC_TRANSPORT_REMOVAL_V6_20260917
+ * The V4_12 private-fileXio transport below is the only live PS2
+ * CDDA producer. The old producer had no call site and reserved a
+ * 256 KiB window plus 16 KiB stack without feeding playback.
+ * Keep only the monotonic stream identity counter used by the live
+ * private-fileXio transport. */
 static unsigned int s_AuroraPdAsyncSerialCounter;
-
-static volatile unsigned int s_AuroraPdAsyncReqSeq;
-static volatile unsigned int s_AuroraPdAsyncReqSerial;
-static volatile long s_AuroraPdAsyncReqStart;
-static char s_AuroraPdAsyncReqPath[1024];
-
-static volatile unsigned int s_AuroraPdAsyncBufSerial;
-static volatile long s_AuroraPdAsyncBufStart;
-static volatile size_t s_AuroraPdAsyncBufReady;
-
-static void AuroraPdAsyncThread(void *arg)
-{
-  unsigned int handled_seq = 0;
-  unsigned int active_seq = 0;
-  long active_start = 0;
-  long worker_pos = 0;
-  char active_path[1024];
-  char open_path[1024];
-  /* AURORA_V4_7_SEGACD_CDDA_WORKER_VFS_SEEK_FIX_20260830
-   * Explicit RFILE/VFS: never rely on stdio-transform macro semantics in
-   * the async CDDA worker. */
-  RFILE *worker_file = NULL;
-
-  (void)arg;
-  active_path[0] = 0;
-  open_path[0] = 0;
-
-  for (;;)
-  {
-    unsigned int seq;
-    size_t done, want;
-    int64_t got;
-
-    WaitSema(s_AuroraPdAsyncSema);
-    seq = s_AuroraPdAsyncReqSeq;
-
-    if (seq != handled_seq)
-    {
-      handled_seq = seq;
-      active_seq = seq;
-      active_start = s_AuroraPdAsyncReqStart;
-      strncpy(active_path, s_AuroraPdAsyncReqPath,
-              sizeof(active_path) - 1);
-      active_path[sizeof(active_path) - 1] = 0;
-
-      if (!active_path[0])
-      {
-        if (worker_file)
-          filestream_close(worker_file);
-        worker_file = NULL;
-        open_path[0] = 0;
-        continue;
-      }
-
-      if (!worker_file || strcmp(open_path, active_path))
-      {
-        if (worker_file)
-          filestream_close(worker_file);
-        worker_file = filestream_open(
-          active_path,
-          RETRO_VFS_FILE_ACCESS_READ,
-          RETRO_VFS_FILE_ACCESS_HINT_NONE);
-        open_path[0] = 0;
-        if (worker_file)
-        {
-          /* VFS RFILE has no stdio setvbuf; separate handle is enough. */
-          strncpy(open_path, active_path, sizeof(open_path) - 1);
-          open_path[sizeof(open_path) - 1] = 0;
-        }
-      }
-
-      if (!worker_file ||
-          filestream_seek(worker_file, active_start,
-                          RETRO_VFS_SEEK_POSITION_START) < 0)
-      {
-        if (worker_file)
-        {
-          filestream_close(worker_file);
-          worker_file = NULL;
-          open_path[0] = 0;
-        }
-        continue;
-      }
-      worker_pos = active_start;
-    }
-
-    if (!worker_file || active_seq != s_AuroraPdAsyncReqSeq)
-      continue;
-
-    done = s_AuroraPdAsyncBufReady;
-    if (done >= AURORA_PD_ASYNC_BYTES)
-      continue;
-
-    if (worker_pos != active_start + (long)done)
-    {
-      if (filestream_seek(worker_file,
-                          active_start + (long)done,
-                          RETRO_VFS_SEEK_POSITION_START) < 0)
-        continue;
-      worker_pos = active_start + (long)done;
-    }
-
-    want = AURORA_PD_ASYNC_BYTES - done;
-    if (want > AURORA_PD_ASYNC_CHUNK)
-      want = AURORA_PD_ASYNC_CHUNK;
-
-    got = filestream_read(
-      worker_file, s_AuroraPdAsyncBuffer + done, (int64_t)want);
-
-    if (active_seq != s_AuroraPdAsyncReqSeq)
-      continue;
-
-    if (got > 0)
-    {
-      worker_pos += (long)got;
-      AURORA_EE_SYNC();
-      s_AuroraPdAsyncBufReady = done + (size_t)got;
-    }
-  }
-}
-
-static int AuroraPdAsyncEnsureThread(void)
-{
-  AuroraEeSemaT sema;
-  AuroraEeThreadT thread;
-  AuroraEeThreadStatusT current;
-  int priority = 40;
-
-  if (s_AuroraPdAsyncThreadId >= 0 && s_AuroraPdAsyncSema >= 0)
-    return 1;
-
-  memset(&sema, 0, sizeof(sema));
-  sema.init_count = 0;
-  sema.max_count = 1;
-  s_AuroraPdAsyncSema = CreateSema(&sema);
-  if (s_AuroraPdAsyncSema < 0)
-    return 0;
-
-  memset(&current, 0, sizeof(current));
-  if (ReferThreadStatus(0, &current) >= 0)
-  {
-    priority = current.current_priority;
-    if (priority > 1)
-      --priority;
-  }
-
-  memset(&thread, 0, sizeof(thread));
-  thread.func = (void *)AuroraPdAsyncThread;
-  thread.stack = s_AuroraPdAsyncStack;
-  thread.stack_size = sizeof(s_AuroraPdAsyncStack);
-  thread.gp_reg = &_gp;
-  thread.initial_priority = priority;
-
-  s_AuroraPdAsyncThreadId = CreateThread(&thread);
-  if (s_AuroraPdAsyncThreadId < 0)
-  {
-    DeleteSema(s_AuroraPdAsyncSema);
-    s_AuroraPdAsyncSema = -1;
-    return 0;
-  }
-
-  if (StartThread(s_AuroraPdAsyncThreadId, NULL) < 0)
-  {
-    DeleteThread(s_AuroraPdAsyncThreadId);
-    DeleteSema(s_AuroraPdAsyncSema);
-    s_AuroraPdAsyncThreadId = -1;
-    s_AuroraPdAsyncSema = -1;
-    return 0;
-  }
-
-  return 1;
-}
-
-static void AuroraPdAsyncSignal(void)
-{
-  if (s_AuroraPdAsyncSema >= 0)
-    (void)SignalSema(s_AuroraPdAsyncSema);
-}
-
-static void AuroraPdAsyncReset(unsigned int serial,
-                               const char *path, long start)
-{
-  if (!serial || !path || !*path || !AuroraPdAsyncEnsureThread())
-    return;
-
-  s_AuroraPdAsyncReqSerial = serial;
-  s_AuroraPdAsyncReqStart = start;
-  strncpy(s_AuroraPdAsyncReqPath, path,
-          sizeof(s_AuroraPdAsyncReqPath) - 1);
-  s_AuroraPdAsyncReqPath[sizeof(s_AuroraPdAsyncReqPath) - 1] = 0;
-
-  s_AuroraPdAsyncBufSerial = serial;
-  s_AuroraPdAsyncBufStart = start;
-  s_AuroraPdAsyncBufReady = 0;
-  AURORA_EE_SYNC();
-  ++s_AuroraPdAsyncReqSeq;
-  AuroraPdAsyncSignal();
-}
-
-static void AuroraPdAsyncKick(AuroraPdStreamState *state, long pos)
-{
-  long ready_end;
-
-  if (!state || !state->async_serial || !state->async_path[0])
-    return;
-
-  if (s_AuroraPdAsyncBufSerial != state->async_serial ||
-      pos < s_AuroraPdAsyncBufStart ||
-      pos >= s_AuroraPdAsyncBufStart + AURORA_PD_ASYNC_BYTES)
-  {
-    AuroraPdAsyncReset(state->async_serial, state->async_path, pos);
-    return;
-  }
-
-  ready_end = s_AuroraPdAsyncBufStart +
-              (long)s_AuroraPdAsyncBufReady;
-
-  /* AURORA_V4_9_SEGACD_CDDA_CHASE_REVIVE_20260830
-   * Audio chases game: if READY bytes are materially behind the logical
-   * playhead, discard that obsolete generation and refill from NOW. */
-  if (pos > ready_end + AURORA_PD_ASYNC_REBASE_LAG)
-  {
-    AuroraPdAsyncReset(state->async_serial, state->async_path, pos);
-    return;
-  }
-
-  if (s_AuroraPdAsyncBufReady < AURORA_PD_ASYNC_BYTES)
-    AuroraPdAsyncSignal();
-}
 
 /* V4_12_1: implementation lives in the private-fileXio block below. */
 static void AuroraPdFxRequest(AuroraPdStreamState *state,
@@ -379,35 +134,8 @@ void PicoDriveAurora_PrimeCdAudio(pm_file *stream)
 }
 
 
-static void AuroraPdAsyncForget(unsigned int serial)
-{
-  if (!serial)
-    return;
-
-  if (s_AuroraPdAsyncBufSerial == serial ||
-      s_AuroraPdAsyncReqSerial == serial)
-  {
-    s_AuroraPdAsyncBufSerial = 0;
-    s_AuroraPdAsyncBufReady = 0;
-    s_AuroraPdAsyncReqSerial = 0;
-    s_AuroraPdAsyncReqPath[0] = 0;
-    AURORA_EE_SYNC();
-    ++s_AuroraPdAsyncReqSeq;
-    AuroraPdAsyncSignal();
-  }
-}
-
-static void AuroraPdAsyncCancelAll(void)
-{
-  s_AuroraPdAsyncBufSerial = 0;
-  s_AuroraPdAsyncBufReady = 0;
-  s_AuroraPdAsyncReqSerial = 0;
-  s_AuroraPdAsyncReqPath[0] = 0;
-  AURORA_EE_SYNC();
-  ++s_AuroraPdAsyncReqSeq;
-  AuroraPdAsyncSignal();
-}
-
+/* AURORA_SEGACD_DEAD_ASYNC_CLEANUP_REMOVAL_V6_20260917
+ * Forget/Cancel helpers belonged only to the removed producer. */
 /* AURORA_EXTREME_CD_VIDEO_FIRST_V1_20260830 */
 static int s_AuroraPdCdAudioSafeWindow;
 static int s_AuroraPdCdAudioRefillRequested;
@@ -444,8 +172,6 @@ void PicoDriveAurora_SetCdMusicEnabled(int enabled)
     s_AuroraPdCdAudioSafeWindow = 0;
     s_AuroraPdCdAudioRefillRequested = 0;
     s_AuroraPdCdAudioPendingStream = NULL;
-    /* AURORA_ASYNC_CDDA_VIDEO_ABSOLUTE_V4_20260830 */
-    AuroraPdAsyncCancelAll();
   }
 }
 
@@ -865,10 +591,6 @@ int PicoDriveAurora_PrepareGameSwitch(void)
   s_AuroraPdCdAudioRefillRequested = 0;
   s_AuroraPdCdAudioPendingStream = NULL;
 
-  /* Currently dormant for CDDA, but invalidate it as part of the same
-   * lifetime boundary so an older/future producer cannot survive a switch. */
-  AuroraPdAsyncCancelAll();
-
   for (i = 0; i < 250; ++i)
   {
     if (!s_AuroraPdFxControlBusy)
@@ -1177,8 +899,6 @@ static void AuroraPdCloseCached(pm_file *stream)
   {
     /* AURORA_ASYNC_CDDA_VIDEO_ABSOLUTE_V4_20260830 */
     AuroraPdFxForget(
-      ((AuroraPdStreamState *)stream->param)->async_serial);
-    AuroraPdAsyncForget(
       ((AuroraPdStreamState *)stream->param)->async_serial);
     free(stream->param);
     stream->param = NULL;
