@@ -16,6 +16,18 @@
 #include "sound/ym2612.h"
 #include "sound/sn76496.h"
 
+#ifdef NO_32X
+/* AURORA_PICODRIVE_NO32X_MEMORY_DECLS_V4_1F_20260921
+ * The generic C I/O handlers call these before the NO_32X fallback
+ * definitions near the end of this translation unit. C99 must see
+ * the exact prototypes first, or the later u32 definitions conflict
+ * with an implicit int() declaration. */
+u32 PicoRead8_32x(u32 a);
+u32 PicoRead16_32x(u32 a);
+void PicoWrite8_32x(u32 a, u32 d);
+void PicoWrite16_32x(u32 a, u32 d);
+#endif
+
 extern unsigned int lastSSRamWrite; // used by serial eeprom code
 
 uptr m68k_read8_map  [0x1000000 >> M68K_MEM_SHIFT];
@@ -833,7 +845,7 @@ static u32 PicoRead8_sram(u32 a)
   // XXX: this is banking unfriendly
   if (a < Pico.romsize)
     return Pico.rom[MEM_BE2(a)];
- 
+
   return m68k_unmapped_read8(a);
 }
 
@@ -1652,12 +1664,16 @@ void ym2612_unpack_timers(const void *buf, size_t size)
   }
 }
 
-#if defined(NO_32X) && defined(_ASM_MEMORY_C)
-// referenced by asm code
-u32 PicoRead8_32x(u32 a) { return 0; }
-u32 PicoRead16_32x(u32 a) { return 0; }
-void PicoWrite8_32x(u32 a, u32 d) {}
-void PicoWrite16_32x(u32 a, u32 d) {}
+#ifdef NO_32X
+/* AURORA_PICODRIVE_NO32X_MEMORY_STUBS_V4_1D_20260921
+ * The generic C I/O path still references the 32X accessors even when the
+ * 32X translation units are omitted.  Keep the existing no-hardware semantics
+ * (reads return 0, writes are ignored) for every NO_32X build, not only the
+ * ARM asm-memory configuration. */
+u32 PicoRead8_32x(u32 a) { (void)a; return 0; }
+u32 PicoRead16_32x(u32 a) { (void)a; return 0; }
+void PicoWrite8_32x(u32 a, u32 d) { (void)a; (void)d; }
+void PicoWrite16_32x(u32 a, u32 d) { (void)a; (void)d; }
 #endif
 
 // -----------------------------------------------------------------

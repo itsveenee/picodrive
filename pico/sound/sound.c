@@ -22,8 +22,13 @@
 int PicoDriveAurora_CdMusicEnabled(void);
 /* AURORA_V4_9_SEGACD_CDDA_CHASE_REVIVE_20260830 */
 void PicoDriveAurora_PrimeCdAudio(pm_file *stream);
-/* AURORA_V4_4_BUILD_FIX_32X_VIDEO_FIRST_20260830 */
+#ifndef NO_32X
+/* AURORA_V4_4_BUILD_FIX_32X_VIDEO_FIRST_20260830
+ * AURORA_PICODRIVE_NO32X_SOUND_HOOK_V4_1N_20260921:
+ * this policy hook belongs only to the 32X runtime; the Aurora bridge symbol
+ * is intentionally absent from no_32x=1 builds. */
 int PicoDriveAurora_32xAudioSacrifice(void);
+#endif
 #endif
 
 #define YM2612_CH6PAN   0x1b6   // panning register for channel 6 (used for DAC)
@@ -709,7 +714,7 @@ static int PsndRender(int offset, int length)
     p32x_pwm_update(buf32, length-offset, stereo);
 
   // convert + limit to normal 16bit output
-#if defined(RENDER_GSKIT_PS2)
+#if defined(RENDER_GSKIT_PS2) && !defined(NO_32X)
   if (PicoIn.sndOut &&
       !((PicoIn.AHW & PAHW_32X) &&
         PicoDriveAurora_32xAudioSacrifice()))
@@ -729,7 +734,7 @@ PICO_INTERNAL void PsndGetSamples(int y)
 
   curr_pos  = PsndRender(0, Pico.snd.len_use);
 
-#if defined(RENDER_GSKIT_PS2)
+#if defined(RENDER_GSKIT_PS2) && !defined(NO_32X)
   if (PicoIn.writeSound && PicoIn.sndOut &&
       !((PicoIn.AHW & PAHW_32X) &&
         PicoDriveAurora_32xAudioSacrifice()))

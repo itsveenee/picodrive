@@ -421,7 +421,11 @@ static int state_load(void *file)
 {
   unsigned char buff_m68k[0x60], buff_s68k[0x60];
   unsigned char buff_z80[Z80_STATE_SIZE];
+#ifndef NO_32X
+  /* AURORA_PICODRIVE_NO32X_STATE_GUARDS_V4_1G_20260921
+   * SH2 state exists only when the 32X implementation is built. */
   unsigned char buff_sh2[SH2_STATE_SIZE];
+#endif
   unsigned char buff_vdp[0x200];
   unsigned char *buf = NULL;
   unsigned char chunk;
@@ -447,7 +451,9 @@ static int state_load(void *file)
   CHECKED_READ(4, &ver);
 
   memset(pcd_event_times, 0, sizeof(pcd_event_times));
+#ifndef NO_32X
   memset(p32x_event_times, 0, sizeof(p32x_event_times));
+#endif
 
   while (!areaEof(file))
   {

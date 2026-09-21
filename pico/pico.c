@@ -351,8 +351,13 @@ void PicoLoopPrepare(void)
 
   if (PicoIn.AHW & PAHW_MCD)
     PicoMCDPrepare();
+#ifndef NO_32X
+  /* AURORA_PICODRIVE_NO32X_COMMON_GUARDS_V4_1C_20260921
+   * no_32x=1 omits the 32X implementation TU, so this runtime-gated
+   * common-core call must also disappear at compile time. */
   if (PicoIn.AHW & PAHW_32X)
     Pico32xPrepare();
+#endif
   if (PicoIn.AHW & PAHW_SMS)
     PicoPrepareMS();
 }
@@ -386,8 +391,10 @@ void PicoSyncVideo(int to, int off, int on)
 {
   // in case of 32X, sync that first to catch 32X mid-frame changes
   // NB that may sync the MD VDP as well, up to the last line
+#ifndef NO_32X
   if (PicoIn.AHW & PAHW_32X)
     p32x_sync_sh2s(Pico.t.m68c_frame_start + (int)(488.5*2)*to/2 - 1);
+#endif
 
   PicoDrawSync(to, off, on);
 }

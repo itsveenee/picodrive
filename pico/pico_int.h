@@ -1159,12 +1159,28 @@ void REGPARM(3) sh2_peripheral_write16(u32 a, u32 d, SH2 *sh2);
 void REGPARM(3) sh2_peripheral_write32(u32 a, u32 d, SH2 *sh2);
 
 #else
+/* AURORA_PICODRIVE_NO32X_HEADER_STUBS_V4_1G_20260921
+ * no_32x=1 omits the 32X implementation translation units.  Keep the
+ * always-built common core source-compatible with a complete no-op facade.
+ * Pico32xStateLoaded takes an argument in state.c, hence the variadic macro. */
 #define Pico32xInit()
 #define PicoPower32x()
 #define PicoReset32x()
 #define PicoFrame32x()
 #define PicoUnload32x()
-#define Pico32xStateLoaded()
+#define Pico32xStartup()
+#define Pico32xShutdown()
+#define Pico32xPrepare()
+#define Pico32xStateLoaded(...)
+#define p32x_sync_sh2s(...)
+/* AURORA_PICODRIVE_NO32X_DRAW_FACADE_V4_1H_20260921
+ * draw.c is always built, while pico/32x/draw.c is omitted by no_32x=1.
+ * Keep its generic API source-compatible without pulling 32X code back in.
+ * If a stale PAHW_32X bit ever reaches SetOutBuf, fall back to the MD buffer. */
+#define PicoDrawSetOutFormat32x(...) ((void)0)
+#define PicoDrawSetOutBuf32X(dest, increment) PicoDrawSetOutBufMD((dest), (increment))
+#define PicoScan32xBegin PicoScanBegin
+#define PicoScan32xEnd PicoScanEnd
 #define FinalizeLine32xRGB555 NULL
 #define p32x_pwm_update(...)
 #define p32x_timers_recalc()
