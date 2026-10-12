@@ -11,6 +11,7 @@
 #include <string.h>
 #include "../pico_int.h"
 #include "ym2612.h"
+#include "aurora_external_profiler.h" /* AURORA_MULTICORE_DEEP_PROFILER_V3_48_20261008 */
 #include "ym2413.h"
 #include "sn76496.h"
 #include "../cd/megasd.h"
@@ -405,7 +406,7 @@ PICO_INTERNAL void PsndDoPSG(int cyc_to)
     stereo = 1;
     pos <<= 1;
   }
-  SN76496Update(PicoIn.sndOut + pos, len, stereo);
+  { AURORA_EXT_BEGIN(_aur_snd); SN76496Update(PicoIn.sndOut + pos, len, stereo); AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_SOUND_PSG,_aur_snd,len); }
 }
 
 PICO_INTERNAL void PsndDoSMSFM(int cyc_to)
@@ -479,7 +480,7 @@ PICO_INTERNAL void PsndDoFM(int cyc_to)
     pos <<= 1;
   }
   if (PicoIn.opt & POPT_EN_FM)
-    PsndFMUpdate(PsndBuffer + pos, len, stereo, 1);
+    { AURORA_EXT_BEGIN(_aur_snd); PsndFMUpdate(PsndBuffer + pos, len, stereo, 1); AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_SOUND_FM,_aur_snd,len); }
 }
 
 PICO_INTERNAL void PsndDoPCM(int cyc_to)
@@ -643,7 +644,7 @@ static int PsndRender(int offset, int length)
     s16 *psgbuf = PicoIn.sndOut + (psglen << stereo);
     Pico.snd.psg_pos += (length-psglen) << 20;
     if (PicoIn.opt & POPT_EN_PSG)
-      SN76496Update(psgbuf, length-psglen, stereo);
+      { AURORA_EXT_BEGIN(_aur_snd); SN76496Update(psgbuf, length-psglen, stereo); AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_SOUND_PSG,_aur_snd,length-psglen); }
   }
 
   if (PicoIn.AHW & PAHW_PICO) {
@@ -655,6 +656,7 @@ static int PsndRender(int offset, int length)
 
   // Fill up DAC output in case of missing samples (Q rounding errors)
   if (length-daclen > 0 && PicoIn.sndOut) {
+    AURORA_EXT_BEGIN(_aur_dac);
     Pico.snd.dac_pos += (length-daclen) << 20;
     if (PicoIn.opt & POPT_EN_STEREO) {
       s16 *d = PicoIn.sndOut + daclen*2;
@@ -672,6 +674,7 @@ static int PsndRender(int offset, int length)
         *d++ += Pico.snd.dac_val;
     }
     Pico.snd.dac_val2 = Pico.snd.dac_val;
+    AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_SOUND_DAC,_aur_dac,length-daclen);
   }
 
   // Add in parts of the FM buffer not yet done
@@ -679,12 +682,12 @@ static int PsndRender(int offset, int length)
     s32 *fmbuf = buf32 + ((fmlen-offset) << stereo);
     Pico.snd.fm_pos += (length-fmlen) << 20;
     if (PicoIn.opt & POPT_EN_FM)
-      PsndFMUpdate(fmbuf, length-fmlen, stereo, 1);
+      { AURORA_EXT_BEGIN(_aur_snd); PsndFMUpdate(fmbuf, length-fmlen, stereo, 1); AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_SOUND_FM,_aur_snd,length-fmlen); }
   }
 
   // CD: PCM sound
   if (PicoIn.AHW & PAHW_MCD) {
-    pcd_pcm_update(buf32, length-offset, stereo);
+    { AURORA_EXT_BEGIN(_aur_snd); pcd_pcm_update(buf32, length-offset, stereo); AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_SOUND_PCM,_aur_snd,length-offset); }
   }
 
   // CD: CDDA audio
@@ -699,7 +702,7 @@ static int PsndRender(int offset, int length)
      * Extreme policy therefore mutes it on PS2. Raw/WAV/CHD stay fail-soft. */
     if (Pico_mcd->cdda_type != CT_MP3 &&
         Pico_mcd->cdda_type != CT_OGG)
-      cdda_raw_update(buf32, length-offset, stereo);
+      { AURORA_EXT_BEGIN(_aur_snd); cdda_raw_update(buf32, length-offset, stereo); AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_SOUND_CDDA,_aur_snd,length-offset); }
 #else
     if (Pico_mcd->cdda_type == CT_MP3)
       mp3_update(buf32, length-offset, stereo);
@@ -721,7 +724,7 @@ static int PsndRender(int offset, int length)
 #else
   if (PicoIn.sndOut)
 #endif
-    PsndMix_32_to_16(PicoIn.sndOut+(offset<<stereo), buf32, length-offset);
+    { AURORA_EXT_BEGIN(_aur_snd); PsndMix_32_to_16(PicoIn.sndOut+(offset<<stereo), buf32, length-offset); AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_SOUND_MIX,_aur_snd,length-offset); }
 
   pprof_end(sound);
 

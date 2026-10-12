@@ -9,6 +9,7 @@
 
 #include "../pico_int.h"
 #include "../sound/ym2612.h"
+#include "aurora_external_profiler.h" /* AURORA_MULTICORE_DEEP_PROFILER_V3_48_20261008 */
 #include "megasd.h"
 
 extern unsigned char formatted_bram[4*0x10];
@@ -132,6 +133,7 @@ static void SekRunS68k(unsigned int to)
   if ((cyc_do = SekCycleAimS68k - SekCycleCntS68k) <= 0)
     return;
 
+  AURORA_EXT_BEGIN(_aur_s68k);
   pprof_start(s68k);
   SekCycleCntS68k += cyc_do;
 #if defined(EMU_C68K)
@@ -147,6 +149,7 @@ static void SekRunS68k(unsigned int to)
 #endif
   SekCyclesLeftS68k = 0;
   pprof_end(s68k);
+  AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_MCD_S68K,_aur_s68k,1);
 }
 
 void PicoMCDPrepare(void)

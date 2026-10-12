@@ -10,6 +10,7 @@
 
 #include "pico_int.h"
 #include "sound/ym2612.h"
+#include "aurora_external_profiler.h" /* AURORA_MULTICORE_DEEP_PROFILER_V3_48_20261008 */
 #include "sound/vgm.h"
 #include <zlib.h>
 
@@ -367,6 +368,7 @@ void PicoLoopPrepare(void)
 /* sync z80 to 68k */
 PICO_INTERNAL void PicoSyncZ80(unsigned int m68k_cycles_done)
 {
+  AURORA_EXT_BEGIN(_aur_z80);
   int m68k_cnt;
   int cnt;
 
@@ -384,6 +386,7 @@ PICO_INTERNAL void PicoSyncZ80(unsigned int m68k_cycles_done)
     Pico.t.z80c_cnt += z80_run(cnt);
 
   pprof_end(z80);
+  AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_Z80,_aur_z80,1);
 }
 
 // not to be called while SH2 CPUs are running to prevent recursion
@@ -396,11 +399,12 @@ void PicoSyncVideo(int to, int off, int on)
     p32x_sync_sh2s(Pico.t.m68c_frame_start + (int)(488.5*2)*to/2 - 1);
 #endif
 
-  PicoDrawSync(to, off, on);
+  { AURORA_EXT_BEGIN(_aur_vdp); PicoDrawSync(to, off, on); AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_VDP_SYNC,_aur_vdp,1); }
 }
 
 void PicoFrame(void)
 {
+  AURORA_EXT_BEGIN(_aur_pico_frame);
   pprof_start(frame);
 
   Pico.m.frame_count++;
@@ -430,6 +434,7 @@ void PicoFrame(void)
 
 end:
   pprof_end(frame);
+  AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_PICO_FRAME,_aur_pico_frame,1);
 }
 
 void PicoFrameDrawOnly(void)

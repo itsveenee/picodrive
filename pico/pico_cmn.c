@@ -1,3 +1,4 @@
+#include "aurora_external_profiler.h" /* AURORA_MULTICORE_DEEP_PROFILER_V3_48_20261008 */
 /*
  * common code for base/cd/32x
  * (C) notaz, 2007-2009,2013
@@ -85,6 +86,7 @@ static void SekExecM68k(int cyc_do)
 
 static int SekSyncM68k(int once)
 {
+  AURORA_EXT_BEGIN(_aur_m68k);
   int cyc_do;
 
   pprof_start(m68k);
@@ -110,6 +112,7 @@ static int SekSyncM68k(int once)
   pevt_log_m68k_o(EVT_RUN_END);
   pprof_end(m68k);
 
+  AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_M68K,_aur_m68k,1);
   return Pico.t.m68c_aim > Pico.t.m68c_cnt;
 }
 
@@ -180,6 +183,7 @@ static void do_timing_hacks_start(struct PicoVideo *pv)
 
 static int PicoFrameHints(void)
 {
+  AURORA_EXT_BEGIN(_aur_hints);
   struct PicoVideo *pv = &Pico.video;
   int lines, y, lines_vis, skip;
   int hint; // Hint counter
@@ -241,7 +245,7 @@ static int PicoFrameHints(void)
       !PicoAltRendererFallbackFrame && !skip)
   {
     if (Pico.est.rendstatus & PDRAW_SYNC_NEEDED)
-      PicoFrameFull();
+      { AURORA_EXT_BEGIN(_aur_vdp); PicoFrameFull(); AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_VDP_FULL,_aur_vdp,1); }
 #ifdef DRAW_FINISH_FUNC
     DRAW_FINISH_FUNC();
 #endif
@@ -406,13 +410,14 @@ static int PicoFrameHints(void)
   SyncCPUs(Pico.t.m68c_aim);
 
   // get samples from sound chips
-  PsndGetSamples(y);
+  { AURORA_EXT_BEGIN(_aur_sound); PsndGetSamples(y); AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_SOUND_TOTAL,_aur_sound,Pico.snd.len_use); }
 
-  timers_cycle(cycles_68k_to_z80(Pico.t.m68c_aim - Pico.t.m68c_frame_start));
+  { AURORA_EXT_BEGIN(_aur_tim); timers_cycle(cycles_68k_to_z80(Pico.t.m68c_aim - Pico.t.m68c_frame_start)); AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_TIMERS,_aur_tim,1); }
   z80_resetCycles();
 
   pv->hint_cnt = hint;
 
+  AURORA_EXT_END(AURORA_EXT_CORE_SEGA,AURORA_SEGA_FRAME_HINTS,_aur_hints,1);
   return 0;
 }
 
