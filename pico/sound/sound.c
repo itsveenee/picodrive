@@ -10,6 +10,9 @@
 
 #include <string.h>
 #include "../pico_int.h"
+#if defined(RENDER_GSKIT_PS2)
+#include "../cd/aurora_adp.h" /* AURORA_ADP_VN3 */
+#endif
 #include "ym2612.h"
 #include "aurora_external_profiler.h" /* AURORA_MULTICORE_DEEP_PROFILER_V3_48_20261008 */
 #include "ym2413.h"
@@ -23,6 +26,8 @@
 int PicoDriveAurora_CdMusicEnabled(void);
 /* AURORA_V4_9_SEGACD_CDDA_CHASE_REVIVE_20260830 */
 void PicoDriveAurora_PrimeCdAudio(pm_file *stream);
+/* AURORA_AURADP_VN10_SEGA: flag de integridade do ultimo setor comprimido */
+int PicoDriveAurora_CdAudioLastReadComplete(void);
 #ifndef NO_32X
 /* AURORA_V4_4_BUILD_FIX_32X_VIDEO_FIRST_20260830
  * AURORA_PICODRIVE_NO32X_SOUND_HOOK_V4_1N_20260921:
@@ -510,6 +515,94 @@ PICO_INTERNAL void PsndDoPCM(int cyc_to)
 }
 
 // cdda
+#if defined(RENDER_GSKIT_PS2)
+/* AURORA_ADP_VN3: cache de exatamente um setor, só alocado ao tocar ADP.
+ * Não altera o tipo de pm_file e utiliza o fail-soft assíncrono do Aurora. */
+typedef struct {
+  pm_file *stream;
+  uint64_t logical_pos;
+  int32_t cached_sector;
+  int32_t stream_next_sector;
+  uint8_t pcm[AURORA_ADP_PCM];
+} AuroraAdpPlayback;
+static AuroraAdpPlayback *s_AuroraAdpPlayback;
+
+static void aurora_adp_release(void)
+{
+  if (s_AuroraAdpPlayback) free(s_AuroraAdpPlayback);
+  s_AuroraAdpPlayback = NULL;
+}
+static void aurora_adp_start(pm_file *stream, int64_t pcm_byte_pos)
+{
+  AuroraAdpPlayback *st;
+  aurora_adp_release();
+  st = (AuroraAdpPlayback *)calloc(1,sizeof(*st));
+  if (!st) return;
+  st->stream = stream;
+  st->logical_pos = (pcm_byte_pos > 0) ? (uint64_t)pcm_byte_pos : 0;
+  st->cached_sector = -1;
+  st->stream_next_sector = -1;
+  s_AuroraAdpPlayback = st;
+  if (PicoDriveAurora_CdMusicEnabled()) {
+    uint64_t s = st->logical_pos / AURORA_ADP_PCM;
+    if (s < (uint64_t)(stream->size-AURORA_ADP_HEADER)/AURORA_ADP_PACKED) {
+      pm_seek(stream,(long)(AURORA_ADP_HEADER+s*AURORA_ADP_PACKED),SEEK_SET);
+      st->stream_next_sector=(int32_t)s;
+      PicoDriveAurora_PrimeCdAudio(stream);
+    }
+  }
+}
+static void aurora_adp_skip(unsigned int pcm_bytes)
+{
+  if (s_AuroraAdpPlayback)
+    s_AuroraAdpPlayback->logical_pos += pcm_bytes;
+}
+static int aurora_adp_read(void *out, int bytes, pm_file *stream)
+{
+  AuroraAdpPlayback *st=s_AuroraAdpPlayback;
+  uint8_t *dst=(uint8_t *)out;
+  int remaining=bytes;
+  if (!st || st->stream!=stream) {
+    memset(dst,0,bytes);
+    return bytes; /* fail-soft: áudio mudo, nunca travar o jogo */
+  }
+  while (remaining>0) {
+    uint64_t logical_sector=st->logical_pos/AURORA_ADP_PCM;
+    uint64_t sector_count=(stream->size-AURORA_ADP_HEADER)/AURORA_ADP_PACKED;
+    int offset=(int)(st->logical_pos%AURORA_ADP_PCM);
+    int take=(int)AURORA_ADP_PCM-offset;
+    if (take>remaining) take=remaining;
+    if (logical_sector>=sector_count) {
+      memset(dst,0,take);
+    } else {
+      if (st->cached_sector!=(int32_t)logical_sector) {
+        uint8_t packed[AURORA_ADP_PACKED];
+        int ret;
+        if (st->stream_next_sector!=(int32_t)logical_sector) {
+          pm_seek(stream,(long)(AURORA_ADP_HEADER+logical_sector*AURORA_ADP_PACKED),SEEK_SET);
+        }
+        /* pm_read_audio é não bloqueante para PMT_CD_UNCOMPRESSED no PS2. */
+        memset(packed,0,sizeof(packed));
+        ret=(int)pm_read_audio(packed,sizeof(packed),stream);
+        st->stream_next_sector=(int32_t)logical_sector+1;
+        /* AURORA_AURADP_VN10_SEGA: pm_read_audio() retorna 596 tambem
+         * quando o worker entregou bytes reais + zeros de fail-soft.
+         * Nao decodificar ADPCM parcialmente sintetizado: ruido/estatica. */
+        if (ret==(int)sizeof(packed) &&
+            PicoDriveAurora_CdAudioLastReadComplete())
+          aurora_adp_decode(packed,st->pcm);
+        else
+          memset(st->pcm,0,sizeof(st->pcm));
+        st->cached_sector=(int32_t)logical_sector;
+      }
+      memcpy(dst,st->pcm+offset,take);
+    }
+    dst+=take; remaining-=take; st->logical_pos+=take;
+  }
+  return bytes;
+}
+#endif
+
 static void cdda_raw_update(s32 *buffer, int length, int stereo)
 {
   int ret, cdda_bytes;
@@ -533,12 +626,20 @@ static void cdda_raw_update(s32 *buffer, int length, int stereo)
    * no refill request and no CDDA mix. PCM/FM/PSG are untouched. */
   if (!PicoDriveAurora_CdMusicEnabled())
   {
-    pm_seek(Pico_mcd->cdda_stream, cdda_bytes, SEEK_CUR);
+    if (Pico_mcd->cdda_type == CT_ADP) /* AURORA_ADP_VN3 */
+      aurora_adp_skip(cdda_bytes);
+    else
+      pm_seek(Pico_mcd->cdda_stream, cdda_bytes, SEEK_CUR);
     return;
   }
 #endif
 
-  ret = pm_read_audio(cdda_out_buffer, cdda_bytes, Pico_mcd->cdda_stream);
+#if defined(RENDER_GSKIT_PS2)
+  if (Pico_mcd->cdda_type == CT_ADP) /* AURORA_ADP_VN3 */
+    ret = aurora_adp_read(cdda_out_buffer,cdda_bytes,Pico_mcd->cdda_stream);
+  else
+#endif
+    ret = pm_read_audio(cdda_out_buffer, cdda_bytes, Pico_mcd->cdda_stream);
   if (ret < cdda_bytes) {
     memset((char *)cdda_out_buffer + ret, 0, cdda_bytes - ret);
     Pico_mcd->cdda_stream = NULL;
@@ -556,6 +657,17 @@ static void cdda_raw_update(s32 *buffer, int length, int stereo)
 
 void cdda_start_play(int lba_base, int lba_offset, int lb_len)
 {
+#if defined(RENDER_GSKIT_PS2)
+  /* AURORA_ADP_VN3: logical seek em bytes PCM; offset físico no ADP é
+   * diferente e será convertido para setores compactados sob demanda. */
+  if (Pico_mcd->cdda_type == CT_ADP) {
+    aurora_adp_start(Pico_mcd->cdda_stream,
+       ((int64_t)lba_base+lba_offset)*AURORA_ADP_PCM+
+       (int64_t)Pico_mcd->m.cdda_lba_offset*4);
+    return;
+  }
+  aurora_adp_release();
+#endif
 #if defined(RENDER_GSKIT_PS2)
   /* AURORA_CD_MUSIC_REDBOOK_V3_20260830
    * With CD music Off, do not initialise opaque MP3/OGG storage/decoders. */
@@ -598,6 +710,9 @@ void cdda_start_play(int lba_base, int lba_offset, int lb_len)
 
 void cdda_stop_play(void)
 {
+#if defined(RENDER_GSKIT_PS2)
+  aurora_adp_release(); /* AURORA_ADP_VN3 */
+#endif
   if (Pico_mcd->cdda_type == CT_OGG)
     ogg_stop_play();
   Pico_mcd->cdda_stream = NULL;

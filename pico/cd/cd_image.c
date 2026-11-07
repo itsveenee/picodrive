@@ -10,6 +10,9 @@
 #include "genplus_macros.h"
 #include "cdd.h"
 #include "cd_parse.h"
+#if defined(RENDER_GSKIT_PS2)
+#include "aurora_adp.h" /* AURORA_ADP_VN3 */
+#endif
 
 #if defined(__GNUC__) && __GNUC__ >= 7
 #pragma GCC diagnostic ignored "-Wformat-truncation"
@@ -27,6 +30,53 @@ static FILE *aurora_cd_fopen(const char *fname)
   return fopen(fname, "rb");
 #endif
 }
+
+#if defined(RENDER_GSKIT_PS2)
+/* AURORA_ADP_VN3: valida formato exato e evita aceitar .adp arbitrário. */
+static int handle_adp(const char *fname, int index)
+{
+  pm_file *f = pm_open_cd(fname);
+  uint8_t h[AURORA_ADP_HEADER];
+  uint32_t sectors = 0;
+  track_t *track = &cdd.toc.tracks[index];
+  if (!f) return -1;
+  /* AURORA_AURADP_VN10_SEGA: 64 B apenas, sem aquecer cache
+   * sincrono de 128 KiB antes da primeira musica. */
+  if (!f->file || fread(h,1,sizeof(h),f->file)!=sizeof(h) ||
+      !aurora_adp_parse(h,(uint64_t)f->size,&sectors)) {
+    pm_close(f);
+    elprintf(EL_STATUS,"invalid Aurora ADP: %s",fname);
+    return -1;
+  }
+  pm_seek(f,0,SEEK_SET);
+  track->type = CT_ADP;
+  track->fd = f;
+  track->offset = 0;
+  track->fname = strdup(fname);
+  if (!track->fname) {
+    track->fd = NULL;
+    pm_close(f);
+    return -1;
+  }
+  return (int)sectors;
+}
+/* Uma faixa ADP inválida não pode deixar file handles de outras faixas abertos. */
+static void aurora_adp_abort_image(track_t *tracks, int count)
+{
+  int k;
+  for (k=count-1; k>=0; --k) {
+    if (tracks[k].fd) {
+      if (tracks[k].type == CT_MP3 || tracks[k].type == CT_OGG)
+        fclose(tracks[k].fd);
+      else
+        pm_close(tracks[k].fd);
+      tracks[k].fd = NULL;
+    }
+    free(tracks[k].fname);
+    tracks[k].fname = NULL;
+  }
+}
+#endif
 
 static int handle_mp3(const char *fname, int index)
 {
@@ -188,6 +238,35 @@ int load_cd_image(const char *cd_img_name, int *type)
 
       index = n - 1;
       lba += cue_data->tracks[n].pregap;
+#if defined(RENDER_GSKIT_PS2)
+      if (cue_data->tracks[n].type == CT_ADP) {
+        ret = handle_adp(cue_data->tracks[n].fname, index); /* AURORA_ADP_VN3 */
+        if (ret < 0) {
+          aurora_adp_abort_image(tracks,index);
+          cdparse_destroy(cue_data);
+          return -1;
+        }
+        /* AURORA_AURADP_VN11_INDEX00: PicoDrive's CUE parser ignores
+         * INDEX00 but retains the INDEX01 file sector offset.  AURADP files
+         * are dedicated, so positive offset is the size of physical audio
+         * preceding INDEX01 (not a byte offset in a shared BIN). Keep it
+         * in the .adp, subtract it from programme duration, and advance
+         * logical TOC start by the same pregap. */
+        {
+          const int pregap_audio = cue_data->tracks[n].sector_offset;
+          if (pregap_audio < 0 || pregap_audio >= ret) {
+            elprintf(EL_STATUS, "AURADP INDEX01 beyond payload, track %d", n);
+            aurora_adp_abort_image(tracks,index+1);
+            cdparse_destroy(cue_data);
+            return -1;
+          }
+          tracks[index].offset = pregap_audio;
+          length = ret - pregap_audio;
+          lba += pregap_audio;
+        }
+      }
+      else
+#endif
       if (cue_data->tracks[n].type == CT_MP3) {
         ret = handle_mp3(cue_data->tracks[n].fname, index);
         if (ret < 0)

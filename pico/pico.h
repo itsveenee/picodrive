@@ -341,6 +341,7 @@ enum cd_track_type
   CT_MP3 = CT_AUDIO | 3,
   CT_WAV = CT_AUDIO | 4,
   CT_OGG = CT_AUDIO | 5,
+  CT_ADP = CT_AUDIO | 6, /* AURORA_ADP_VN3: exclusivo PS2 */
 };
 
 typedef struct

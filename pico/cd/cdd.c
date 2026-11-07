@@ -158,7 +158,13 @@ static off_t read_pos = -1;
 void cdd_reset(void)
 {
   /* stop audio streaming */
-  Pico_mcd->cdda_stream = NULL;
+#if defined(RENDER_GSKIT_PS2)
+  /* AURORA_ADP_VN3: liberar heap específico no reset do CD. */
+  if (Pico_mcd->cdda_type == CT_ADP)
+    cdda_stop_play();
+  else
+#endif
+    Pico_mcd->cdda_stream = NULL;
 
   /* reset cycle counter */
   cdd.cycles = 0;

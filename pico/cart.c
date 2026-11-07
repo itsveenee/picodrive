@@ -754,19 +754,33 @@ static void AuroraPdFxMaintain(pm_file *stream,
   AuroraPdFxLaunch(stream, state);
 }
 
+/* AURORA_AURADP_VN10_SEGA: amostras ADPCM so podem ser decodificadas
+ * quando TODO o bloco fisico provem do USB. O leitor CDDA PCM antigo
+ * continua com sua politica de zeros sinteticos e mesmo valor de retorno.
+ * Emulacao e unica chamadora da leitura; worker so alimenta buffers. */
+static int s_AuroraPdCdAudioLastReadComplete;
+int PicoDriveAurora_CdAudioLastReadComplete(void)
+{
+  return s_AuroraPdCdAudioLastReadComplete;
+}
+
 static size_t AuroraPdReadAudioFailsoft(void *ptr, size_t bytes,
                                         pm_file *stream)
 {
   AuroraPdStreamState *state;
   unsigned char *out = (unsigned char *)ptr;
   size_t total = 0;
+  const size_t requested = bytes;
 
+  s_AuroraPdCdAudioLastReadComplete = 0; /* AURORA_AURADP_VN10_SEGA */
   if (!stream || !ptr || bytes == 0)
     return 0;
+  s_AuroraPdCdAudioLastReadComplete = 1;
 
   state = (AuroraPdStreamState *)stream->param;
   if (!state)
   {
+    s_AuroraPdCdAudioLastReadComplete = 0;
     memset(ptr, 0, bytes);
     return bytes;
   }
@@ -831,6 +845,7 @@ static size_t AuroraPdReadAudioFailsoft(void *ptr, size_t bytes,
       if (!drop)
         break;
 
+      s_AuroraPdCdAudioLastReadComplete = 0; /* AURORA_AURADP_VN10_SEGA */
       memset(out, 0, drop);
       out += drop;
       bytes -= drop;
@@ -840,6 +855,8 @@ static size_t AuroraPdReadAudioFailsoft(void *ptr, size_t bytes,
     }
   }
 
+  if (total != requested)
+    s_AuroraPdCdAudioLastReadComplete = 0;
   return total;
 }
 

@@ -343,6 +343,10 @@ file_ok:
 						data->tracks[count].type = CT_WAV;
 					else if (strcasecmp(ext, "ogg") == 0)
 						data->tracks[count].type = CT_OGG;
+#if defined(RENDER_GSKIT_PS2)
+					else if (strcasecmp(ext, "adp") == 0)
+						data->tracks[count].type = CT_ADP; /* AURORA_ADP_VN3 */
+#endif
 					else if (strcasecmp(ext, "bin") == 0)
 						data->tracks[count].type = CT_RAW;
 					else {
